@@ -745,6 +745,51 @@ fn cleans_up_snapshots_without_following_ignored_symlinks() {
     assert_eq!(repo.status(), "");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn preserves_nested_cwd_and_discovers_linked_working_trees() {
+    use std::fs;
+
+    let repo = Repository::new("duck pond\nwith newline");
+    let root = repo.canonical_path();
+    fs::create_dir(root.join("nested")).unwrap();
+    repo.write("nested/duck.txt", "quack\n");
+    repo.commit("Add nested file");
+    let linked = repo.add_worktree("linked pond");
+    for working_tree in [&root, &linked] {
+        let cwd = working_tree.join("nested").canonicalize().unwrap();
+        fs::write(cwd.join("duck.txt"), b"dirty before\n").unwrap();
+        let (status, stdout, stderr, capture) = repo.capture_from(
+            &cwd,
+            &[
+                "run",
+                "--",
+                "bash",
+                "-c",
+                "pwd -P; printf 'honk\\n' > duck.txt",
+            ],
+        );
+        assert!(status.success(), "{stderr}");
+        assert_eq!(stdout, format!("{}\n", cwd.display()));
+        let (files, result) = support::read_capture(&capture);
+        assert_eq!(
+            result["repository_root"].as_str().unwrap(),
+            working_tree.to_str().unwrap()
+        );
+        assert_eq!(result["cwd"].as_str().unwrap(), cwd.to_str().unwrap());
+        assert_eq!(result["capture"]["complete"], true);
+        assert_eq!(result["files"].as_array().unwrap().len(), 1);
+        let change = &result["files"][0];
+        assert_eq!(change["path"], "nested/duck.txt");
+        assert_eq!(
+            change["before_sha256"],
+            format!("{:x}", Sha256::digest(b"dirty before\n"))
+        );
+        assert_eq!(files[change["after_blob"].as_str().unwrap()], b"honk\n");
+        assert_eq!(fs::read(cwd.join("duck.txt")).unwrap(), b"honk\n");
+    }
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");

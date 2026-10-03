@@ -33,3 +33,5 @@ cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
+
+See [capture benchmarks](BENCHMARKS.md) for repeatable speed tests and measured overhead.

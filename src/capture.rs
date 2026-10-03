@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -42,10 +42,18 @@ fn checked(command: &mut Command) -> Result<Output> {
     Ok(output)
 }
 
-fn git_path(cwd: &Path, option: &str) -> Result<PathBuf> {
-    let output = checked(git(cwd).args(["rev-parse", "--path-format=absolute", option]))?;
-    let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-    Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())).canonicalize()?)
+fn discover(cwd: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (repository, _) = gix_discover::upwards(cwd).map_err(|error| error.to_string())?;
+    let (git_dir, worktree) = repository.into_repository_and_work_tree_directories();
+    let root = worktree
+        .ok_or("Kao requires a Git working tree")?
+        .canonicalize()?;
+    let common =
+        match gix_discover::path::from_plain_file_relative_to_file(&git_dir.join("commondir")) {
+            Some(common) => common?,
+            None => git_dir,
+        };
+    Ok((root, common.canonicalize()?))
 }
 
 fn result_output() -> Result<File> {
@@ -197,6 +205,9 @@ fn quote_path(path: &str) -> String {
 }
 
 fn patch(root: &Path, paths: &[(String, bool, bool)]) -> Result<Vec<u8>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     let output = git(root)
         .args([
             "-c",
@@ -287,7 +298,11 @@ fn capture_files(
         .filter(|path| !path.as_os_str().is_empty() && !path.starts_with(".git"))
         .collect();
     let mut paths = snapshot.candidates(&candidates);
-    paths.extend(scoped_paths(root, Some(&candidates))?);
+    let unknown: BTreeSet<_> = candidates
+        .into_iter()
+        .filter(|path| !snapshot.scope.contains(path))
+        .collect();
+    paths.extend(scoped_paths(root, Some(&unknown))?);
     let before_dir = artifacts.join("before");
     let after_dir = artifacts.join("after");
     fs::create_dir(&before_dir)?;
@@ -350,8 +365,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
     }
     let mut output = result_output()?;
     let cwd = std::env::current_dir()?.canonicalize()?;
-    let root = git_path(&cwd, "--show-toplevel")?;
-    let git_dir = git_path(&cwd, "--git-common-dir")?;
+    let (root, git_dir) = discover(&cwd)?;
     let _lock = lock_repository(&git_dir)?;
     let artifacts = tempfile::Builder::new()
         .prefix(".kao-")

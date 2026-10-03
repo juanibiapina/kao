@@ -26,7 +26,12 @@ def run(command, root, **options):
                           stderr=subprocess.PIPE, **options)
 
 
-def measure(root, script, wrapped, output):
+def measure(root, script, wrapped, output, expected_changes):
+    before = {
+        f"src/file-{index:04}.txt": hashlib.sha256(
+            (root / "src" / f"file-{index:04}.txt").read_bytes()).hexdigest()
+        for index in range(expected_changes)
+    } if wrapped else {}
     with output.open("wb") as capture:
         if capture.fileno() != 3:
             os.dup2(capture.fileno(), 3)
@@ -42,6 +47,7 @@ def measure(root, script, wrapped, output):
             assert result["capture"]["complete"] is True
             assert result["command"]["exit_code"] == 0
             for changed in result["files"]:
+                assert before[changed["path"]] == changed["before_sha256"]
                 contents = (root / changed["path"]).read_bytes()
                 assert hashlib.sha256(contents).hexdigest() == changed["after_sha256"]
                 if changed["after_blob"]:
@@ -89,7 +95,7 @@ with tempfile.TemporaryDirectory(prefix="kao-benchmark-") as temporary:
               "samples": args.samples, "cases": {}}
     for name, script, expected_changes in cases:
         for _ in range(2):
-            _, changes = measure(root, script, True, parent / "capture.tar")
+            _, changes = measure(root, script, True, parent / "capture.tar", expected_changes)
             assert changes == expected_changes
         baseline = []
         captured = []
@@ -98,7 +104,7 @@ with tempfile.TemporaryDirectory(prefix="kao-benchmark-") as temporary:
             order = [False, True] if index % 2 == 0 else [True, False]
             sample = {}
             for wrapped in order:
-                elapsed, changes = measure(root, script, wrapped, parent / "capture.tar")
+                elapsed, changes = measure(root, script, wrapped, parent / "capture.tar", expected_changes)
                 if wrapped:
                     assert changes == expected_changes
                 sample[wrapped] = elapsed

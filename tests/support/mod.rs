@@ -276,11 +276,16 @@ impl Repository {
 
     #[cfg(target_os = "macos")]
     pub fn capture(&self, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
+        self.capture_from(&self.path, args)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn capture_from(&self, cwd: &Path, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
         let capture = self.root.join("capture.tar");
         let (status, stdout, stderr) = execute(
             &self.root,
             Command::new("bash")
-                .current_dir(&self.path)
+                .current_dir(cwd)
                 .args(["-c", "exec 3>\"$1\"; shift; exec \"$@\"", "capture"])
                 .arg(&capture)
                 .arg(env!("CARGO_BIN_EXE_kao"))
@@ -346,6 +351,13 @@ impl Repository {
         let child = command.spawn().expect("spawn Kao with capture pipe");
         drop(writer);
         (RunningCapture { child, logs }, reader)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn add_worktree(&self, name: &str) -> std::path::PathBuf {
+        let path = self.root.join(name);
+        self.git(&["worktree", "add", "--detach", path.to_str().unwrap()]);
+        path.canonicalize().unwrap()
     }
 
     #[cfg(target_os = "macos")]
