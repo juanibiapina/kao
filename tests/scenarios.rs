@@ -542,6 +542,65 @@ fn reports_capture_failure_and_retains_available_artifacts() {
     assert_eq!(result["capture"]["complete"], true);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
+    use std::fs;
+
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let (running, reader) = repo.spawn_pipe_capture(
+        "disconnected",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'honk\\n' > duck.txt; exit 7",
+        ],
+    );
+    drop(reader);
+    let (status, stdout, stderr, _) = running.finish_stream(Vec::new());
+    assert_eq!(status.code(), Some(125));
+    assert_eq!(stdout, "");
+    assert!(stderr.contains("capture output failed"), "{stderr}");
+    let retained = std::path::PathBuf::from(
+        stderr
+            .split("artifacts retained at ")
+            .nth(1)
+            .expect("output failure must retain artifacts")
+            .trim(),
+    );
+    let capture = fs::read(retained.join("capture.tar")).unwrap();
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["command"]["exit_code"], 7);
+    assert_eq!(
+        result["capture"]["complete"], true,
+        "the retained archive must be complete even though delivery failed"
+    );
+    assert_eq!(
+        files[result["files"][0]["after_blob"].as_str().unwrap()],
+        b"honk\n"
+    );
+    assert_eq!(
+        fs::read(retained.join("snapshot/duck.txt")).unwrap(),
+        b"quack\n"
+    );
+    assert_eq!(repo.read("duck.txt"), "honk\n");
+    let (status, _, stderr, capture) =
+        repo.capture(&["run", "--", "bash", "-c", "printf 'next\\n' > duck.txt"]);
+    assert!(
+        status.success(),
+        "output failure must release the lock: {stderr}"
+    );
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(
+        result["files"][0]["before_sha256"],
+        format!("{:x}", Sha256::digest(b"honk\n"))
+    );
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
