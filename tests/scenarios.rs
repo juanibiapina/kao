@@ -2,10 +2,6 @@ mod support;
 
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
-#[cfg(target_os = "macos")]
-use std::collections::BTreeMap;
-#[cfg(target_os = "macos")]
-use std::io::Read;
 use support::Repository;
 
 #[cfg(target_os = "macos")]
@@ -38,33 +34,7 @@ fn captures_a_text_edit_without_redirecting_the_command() {
         "command stderr must pass through unchanged"
     );
 
-    let mut archive = tar::Archive::new(capture.as_slice());
-    let mut files = BTreeMap::new();
-    let mut last_path = String::new();
-    for entry in archive.entries().expect("capture must be a tar archive") {
-        let mut entry = entry.expect("capture entry must be readable");
-        if entry.header().entry_type().is_dir() {
-            continue;
-        }
-        let path = entry.path().unwrap().to_str().unwrap().to_owned();
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).unwrap();
-        assert!(
-            files.insert(path.clone(), bytes).is_none(),
-            "duplicate archive entry: {path}"
-        );
-        last_path = path;
-    }
-    assert_eq!(
-        last_path, "result.json",
-        "manifest must finalize the capture"
-    );
-    let result: serde_json::Value = serde_json::from_slice(
-        files
-            .get("result.json")
-            .expect("capture must contain result.json"),
-    )
-    .unwrap();
+    let (files, result) = support::read_capture(&capture);
     assert_eq!(result["format_version"], 1);
     assert!(!result["operation_id"].as_str().unwrap().is_empty());
     assert_eq!(
@@ -119,6 +89,60 @@ fn captures_a_text_edit_without_redirecting_the_command() {
         "",
         "reverse patch must restore the committed tree"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn captures_changes_when_the_command_fails() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+
+    let (status, stdout, stderr, capture) = repo.capture(&[
+        "run",
+        "--",
+        "bash",
+        "-c",
+        "printf 'honk\\n' > duck.txt; exit 7",
+    ]);
+
+    assert_eq!(
+        status.code(),
+        Some(7),
+        "Kao must preserve the command exit code"
+    );
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "", "command failure is not a capture error");
+    assert_eq!(repo.read("duck.txt"), "honk\n");
+
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["command"]["exit_code"], 7);
+    assert_eq!(result["capture"]["complete"], true);
+    assert!(result["capture"]["error"].is_null());
+    let changes = result["files"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    let change = &changes[0];
+    assert_eq!(change["path"], "duck.txt");
+    assert_eq!(
+        change["before_sha256"],
+        format!("{:x}", Sha256::digest(b"quack\n"))
+    );
+    assert_eq!(
+        change["after_sha256"],
+        format!("{:x}", Sha256::digest(b"honk\n"))
+    );
+    let blob = files
+        .get(change["after_blob"].as_str().unwrap())
+        .expect("modified text must have an after blob");
+    assert_eq!(blob, b"honk\n");
+    repo.write("duck.txt", std::str::from_utf8(blob).unwrap());
+    repo.reverse_patch(
+        files
+            .get("changes.patch")
+            .expect("capture must contain changes.patch"),
+    );
+    assert_eq!(repo.read("duck.txt"), "quack\n");
+    assert_eq!(repo.status(), "");
 }
 
 #[test]

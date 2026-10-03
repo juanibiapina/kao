@@ -4,7 +4,52 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+pub fn read_capture(
+    capture: &[u8],
+) -> (
+    std::collections::BTreeMap<String, Vec<u8>>,
+    serde_json::Value,
+) {
+    use std::io::Read;
+
+    let mut archive = tar::Archive::new(capture);
+    let mut files = std::collections::BTreeMap::new();
+    let mut last_path = String::new();
+    for entry in archive.entries().expect("capture must be a tar archive") {
+        let mut entry = entry.expect("capture entry must be readable");
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let path = entry.path().unwrap().to_str().unwrap().to_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        assert!(
+            files.insert(path.clone(), bytes).is_none(),
+            "duplicate archive entry: {path}"
+        );
+        last_path = path;
+    }
+    assert_eq!(
+        last_path, "result.json",
+        "manifest must finalize the capture"
+    );
+    let result = serde_json::from_slice(
+        files
+            .get("result.json")
+            .expect("capture must contain result.json"),
+    )
+    .unwrap();
+    (files, result)
+}
+
 fn run(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
+    let result = execute(root, command);
+    assert!(result.0.success(), "fixture: {}", root.display());
+    result
+}
+
+fn execute(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     let stdout = root.join("stdout.log");
     let stderr = root.join("stderr.log");
     command
@@ -41,7 +86,6 @@ fn run(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     let output = fs::read_to_string(stdout).unwrap();
     let errors = fs::read_to_string(stderr).unwrap();
     eprintln!("{description}\nstatus: {status}\nstdout: {output}\nstderr: {errors}");
-    assert!(status.success(), "fixture: {}", root.display());
     (status, output, errors)
 }
 
@@ -97,7 +141,7 @@ impl Repository {
     #[cfg(target_os = "macos")]
     pub fn capture(&self, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
         let capture = self.root.join("capture.tar");
-        let (status, stdout, stderr) = run(
+        let (status, stdout, stderr) = execute(
             &self.root,
             Command::new("bash")
                 .current_dir(&self.path)
