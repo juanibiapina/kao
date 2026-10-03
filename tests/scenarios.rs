@@ -145,6 +145,87 @@ fn captures_changes_when_the_command_fails() {
     assert_eq!(repo.status(), "");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn concurrent_commands_wait_for_the_repository_lock() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+
+    let mut first = repo.spawn_capture(
+        "first",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'first\\n' > duck.txt; printf 'first started\\n'; read -r release",
+        ],
+    );
+    first.wait_for_output("first started\n");
+    let mut second = repo.spawn_capture(
+        "second",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'second started\\n'; printf 'second\\n' >> duck.txt",
+        ],
+    );
+    second.assert_waiting("second started\n");
+    assert_eq!(repo.read("duck.txt"), "first\n");
+
+    first.release();
+    let (first_status, _, first_stderr, first_capture) = first.finish();
+    let (second_status, _, second_stderr, second_capture) = second.finish();
+    assert!(first_status.success());
+    assert!(second_status.success());
+    assert_eq!(first_stderr, "");
+    assert_eq!(second_stderr, "");
+    assert_eq!(repo.read("duck.txt"), "first\nsecond\n");
+
+    let (first_files, first_result) = support::read_capture(&first_capture);
+    let (second_files, second_result) = support::read_capture(&second_capture);
+    for result in [&first_result, &second_result] {
+        assert_eq!(result["capture"]["complete"], true);
+        assert_eq!(result["command"]["exit_code"], 0);
+        assert_eq!(result["files"].as_array().unwrap().len(), 1);
+        assert_eq!(result["files"][0]["path"], "duck.txt");
+    }
+    let first_change = &first_result["files"][0];
+    let second_change = &second_result["files"][0];
+    assert_eq!(
+        first_change["before_sha256"],
+        format!("{:x}", Sha256::digest(b"quack\n"))
+    );
+    assert_eq!(
+        first_change["after_sha256"],
+        format!("{:x}", Sha256::digest(b"first\n"))
+    );
+    assert_eq!(
+        second_change["before_sha256"], first_change["after_sha256"],
+        "second snapshot must be taken after acquiring the lock"
+    );
+    assert_eq!(
+        second_change["after_sha256"],
+        format!("{:x}", Sha256::digest(b"first\nsecond\n"))
+    );
+    assert_eq!(
+        first_files[first_change["after_blob"].as_str().unwrap()],
+        b"first\n"
+    );
+    assert_eq!(
+        second_files[second_change["after_blob"].as_str().unwrap()],
+        b"first\nsecond\n"
+    );
+    repo.reverse_patch(&second_files["changes.patch"]);
+    assert_eq!(repo.read("duck.txt"), "first\n");
+    repo.reverse_patch(&first_files["changes.patch"]);
+    assert_eq!(repo.read("duck.txt"), "quack\n");
+    assert_eq!(repo.status(), "");
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");

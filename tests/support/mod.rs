@@ -49,7 +49,7 @@ fn run(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     result
 }
 
-fn execute(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
+fn configure(root: &Path, command: &mut Command) {
     let stdout = root.join("stdout.log");
     let stderr = root.join("stderr.log");
     command
@@ -66,8 +66,20 @@ fn execute(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
+}
+
+fn execute(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
+    configure(root, command);
     let description = format!("{command:?}");
     let mut child = command.spawn().expect("spawn fixture command");
+    finish(root, &mut child, &description)
+}
+
+fn finish(
+    root: &Path,
+    child: &mut std::process::Child,
+    description: &str,
+) -> (ExitStatus, String, String) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -83,10 +95,87 @@ fn execute(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
         }
         thread::sleep(Duration::from_millis(10));
     };
-    let output = fs::read_to_string(stdout).unwrap();
-    let errors = fs::read_to_string(stderr).unwrap();
+    let output = fs::read_to_string(root.join("stdout.log")).unwrap();
+    let errors = fs::read_to_string(root.join("stderr.log")).unwrap();
     eprintln!("{description}\nstatus: {status}\nstdout: {output}\nstderr: {errors}");
     (status, output, errors)
+}
+
+#[cfg(target_os = "macos")]
+pub struct RunningCapture {
+    child: std::process::Child,
+    logs: std::path::PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl RunningCapture {
+    pub fn wait_for_output(&mut self, signal: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let output = fs::read_to_string(self.logs.join("stdout.log")).unwrap();
+            if output.contains(signal) {
+                return;
+            }
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "command exited before {signal:?}; logs: {}",
+                self.logs.display()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {signal:?}; logs: {}",
+                self.logs.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn assert_waiting(&mut self, command_signal: &str) {
+        self.wait_for_output("invoking Kao\n");
+        let deadline = Instant::now() + Duration::from_millis(300);
+        loop {
+            let output = fs::read_to_string(self.logs.join("stdout.log")).unwrap();
+            assert!(
+                !output.contains(command_signal),
+                "second command started while the first held the lock"
+            );
+            assert!(
+                self.child.try_wait().unwrap().is_none(),
+                "second Kao invocation must wait for the lock"
+            );
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn release(&mut self) {
+        use std::io::Write;
+        self.child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"continue\n")
+            .unwrap();
+    }
+
+    pub fn finish(mut self) -> (ExitStatus, String, String, Vec<u8>) {
+        let (status, stdout, stderr) =
+            finish(&self.logs, &mut self.child, "concurrent Kao capture");
+        let capture = fs::read(self.logs.join("capture.tar")).unwrap();
+        (status, stdout, stderr, capture)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RunningCapture {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
 }
 
 pub struct Repository {
@@ -151,6 +240,29 @@ impl Repository {
                 .args(args),
         );
         (status, stdout, stderr, fs::read(capture).unwrap())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn spawn_capture(&self, name: &str, args: &[&str]) -> RunningCapture {
+        use std::os::unix::process::CommandExt;
+        let logs = self.root.join(name);
+        fs::create_dir(&logs).unwrap();
+        let mut command = Command::new("bash");
+        command
+            .current_dir(&self.path)
+            .args([
+                "-c",
+                "exec 3>\"$1\"; shift; printf 'invoking Kao\\n'; exec \"$@\"",
+                "capture",
+            ])
+            .arg(logs.join("capture.tar"))
+            .arg(env!("CARGO_BIN_EXE_kao"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .process_group(0);
+        configure(&logs, &mut command);
+        let child = command.spawn().expect("spawn concurrent Kao invocation");
+        RunningCapture { child, logs }
     }
 
     #[cfg(target_os = "macos")]
