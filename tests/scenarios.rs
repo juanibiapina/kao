@@ -272,6 +272,61 @@ fn preserves_crlf_and_final_newlines_in_text_captures() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn captures_additions_deletions_and_replacements_from_dirty_working_bytes() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "committed\n");
+    repo.write("deleted.txt", "gone\r\nwithout final newline");
+    repo.write(".gitignore", "ignored/\n");
+    repo.commit("Add starting files");
+    repo.write("duck.txt", "dirty before\n");
+    let before_status = repo.status();
+
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run", "--", "bash", "-c",
+        "rm deleted.txt; mkdir nested ignored; printf 'created\\r\\nlast line' > nested/created.txt; printf 'replacement\\n' > replacement.tmp; mv replacement.tmp duck.txt; printf 'cache\\n' > ignored/cache",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let changes = result["files"].as_array().unwrap();
+    assert_eq!(changes.len(), 3);
+    for (path, before, after) in [
+        ("duck.txt", Some("dirty before\n"), Some("replacement\n")),
+        ("deleted.txt", Some("gone\r\nwithout final newline"), None),
+        ("nested/created.txt", None, Some("created\r\nlast line")),
+    ] {
+        let change = changes
+            .iter()
+            .find(|change| change["path"] == path)
+            .unwrap();
+        let expected_before = before
+            .map(|text| serde_json::json!(format!("{:x}", Sha256::digest(text.as_bytes()))))
+            .unwrap_or(serde_json::Value::Null);
+        let expected_after = after
+            .map(|text| serde_json::json!(format!("{:x}", Sha256::digest(text.as_bytes()))))
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(change["before_sha256"], expected_before);
+        assert_eq!(change["after_sha256"], expected_after);
+        if before.is_none() || after.is_none() {
+            assert!(
+                change["after_blob"].is_null(),
+                "patch must supply complete created/deleted text contents"
+            );
+        }
+    }
+    assert_eq!(repo.read("duck.txt"), "replacement\n");
+    assert_eq!(repo.read("nested/created.txt"), "created\r\nlast line");
+    assert!(!repo.canonical_path().join("deleted.txt").exists());
+    assert_eq!(repo.read("ignored/cache"), "cache\n");
+    repo.reverse_patch(&files["changes.patch"]);
+    assert_eq!(repo.read("duck.txt"), "dirty before\n");
+    assert_eq!(repo.read("deleted.txt"), "gone\r\nwithout final newline");
+    assert!(!repo.canonical_path().join("nested/created.txt").exists());
+    assert_eq!(repo.status(), before_status);
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
