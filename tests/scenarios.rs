@@ -226,6 +226,52 @@ fn concurrent_commands_wait_for_the_repository_lock() {
     assert_eq!(repo.status(), "");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn preserves_crlf_and_final_newlines_in_text_captures() {
+    for (before, after) in [
+        ("quack\r\n", "honk\r\n"),
+        ("quack\r\n", "honk"),
+        ("quack", "honk\n"),
+        ("quack\n", "honk"),
+    ] {
+        let repo = Repository::new("duck pond");
+        repo.write("duck.txt", before);
+        repo.commit("Add duck");
+        let (status, _, stderr, capture) = repo.capture(&[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf '%s' \"$1\" > duck.txt",
+            "edit",
+            after,
+        ]);
+        assert!(status.success(), "{stderr}");
+        let (files, result) = support::read_capture(&capture);
+        assert_eq!(result["capture"]["complete"], true);
+        assert_eq!(result["files"].as_array().unwrap().len(), 1);
+        let change = &result["files"][0];
+        assert_eq!(change["path"], "duck.txt");
+        assert_eq!(
+            change["before_sha256"],
+            format!("{:x}", Sha256::digest(before.as_bytes()))
+        );
+        assert_eq!(
+            change["after_sha256"],
+            format!("{:x}", Sha256::digest(after.as_bytes()))
+        );
+        assert_eq!(
+            files[change["after_blob"].as_str().unwrap()],
+            after.as_bytes()
+        );
+        assert_eq!(repo.read("duck.txt"), after);
+        repo.reverse_patch(&files["changes.patch"]);
+        assert_eq!(repo.read("duck.txt"), before);
+        assert_eq!(repo.status(), "");
+    }
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
