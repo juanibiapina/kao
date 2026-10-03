@@ -601,6 +601,34 @@ fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn rejects_unwritable_fd_three_before_executing_the_command() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    for readonly in [false, true] {
+        let (status, stdout, stderr) = repo.capture_with_unwritable_descriptor(
+            readonly,
+            &[
+                "run",
+                "--",
+                "bash",
+                "-c",
+                "printf 'executed\\n'; printf 'honk\\n' > duck.txt",
+            ],
+        );
+        assert_eq!(status.code(), Some(125));
+        assert_eq!(stdout, "");
+        assert!(
+            stderr.contains("FD 3 must be open for capture output"),
+            "{stderr}"
+        );
+        assert_eq!(repo.read("duck.txt"), "quack\n");
+        assert_eq!(repo.status(), "");
+    }
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");

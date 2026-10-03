@@ -253,6 +253,28 @@ impl Repository {
     }
 
     #[cfg(target_os = "macos")]
+    pub fn capture_with_unwritable_descriptor(
+        &self,
+        readonly: bool,
+        args: &[&str],
+    ) -> (ExitStatus, String, String) {
+        let script = if readonly {
+            "exec 3<\"$1\"; shift; exec \"$@\""
+        } else {
+            "exec 3>&-; shift; exec \"$@\""
+        };
+        execute(
+            &self.root,
+            Command::new("bash")
+                .current_dir(&self.path)
+                .args(["-c", script, "capture"])
+                .arg(self.path.join("duck.txt"))
+                .arg(env!("CARGO_BIN_EXE_kao"))
+                .args(args),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn capture(&self, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
         let capture = self.root.join("capture.tar");
         let (status, stdout, stderr) = execute(
