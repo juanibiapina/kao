@@ -4,7 +4,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn run(root: &Path, command: &mut Command) -> (ExitStatus, String) {
+fn run(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     let stdout = root.join("stdout.log");
     let stderr = root.join("stderr.log");
     command
@@ -42,7 +42,7 @@ fn run(root: &Path, command: &mut Command) -> (ExitStatus, String) {
     let errors = fs::read_to_string(stderr).unwrap();
     eprintln!("{description}\nstatus: {status}\nstdout: {output}\nstderr: {errors}");
     assert!(status.success(), "fixture: {}", root.display());
-    (status, output)
+    (status, output, errors)
 }
 
 pub struct Repository {
@@ -92,6 +92,39 @@ impl Repository {
                 .args(args),
         )
         .1
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn capture(&self, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
+        let capture = self.root.join("capture.tar");
+        let (status, stdout, stderr) = run(
+            &self.root,
+            Command::new("bash")
+                .current_dir(&self.path)
+                .args(["-c", "exec 3>\"$1\"; shift; exec \"$@\"", "capture"])
+                .arg(&capture)
+                .arg(env!("CARGO_BIN_EXE_kao"))
+                .args(args),
+        );
+        (status, stdout, stderr, fs::read(capture).unwrap())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn canonical_path(&self) -> std::path::PathBuf {
+        self.path.canonicalize().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn reverse_patch(&self, patch: &[u8]) {
+        let patch_path = self.root.join("changes.patch");
+        fs::write(&patch_path, patch).unwrap();
+        run(
+            &self.root,
+            Command::new("git")
+                .current_dir(&self.path)
+                .args(["apply", "--reverse"])
+                .arg(patch_path),
+        );
     }
 
     pub fn status(&self) -> String {

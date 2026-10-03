@@ -1,8 +1,21 @@
 # Kao
 
-Kao (pronounced cow) is a copy on write sandboxed command runner.
+Kao (pronounced cow) is a command runner for agents.
 
-The repository currently contains the default Cargo binary scaffold. Running it prints `Hello, world!`; command-runner behavior is not implemented yet.
+> [!WARNING]
+> Kao currently requires macOS and a Git working tree on an APFS filesystem.
+
+## Usage
+
+From a Git working tree:
+
+```sh
+kao run -- bash -c 'cargo fmt' 3>/tmp/capture.tar
+```
+
+Commands run in the current directory with unchanged stdout and stderr. Descriptor 3 receives a tar archive with `changes.patch`, after-content files in `blobs/`, and a final `result.json` manifest. A caller using a pipe must read it while Kao runs.
+
+Kao also locks the repository so commands cannot run in parallel.
 
 ## Development
 
@@ -10,7 +23,7 @@ Build and run:
 
 ```sh
 cargo build --locked
-cargo run --locked
+cargo run --locked -- run -- bash -c 'printf "hello\\n"' 3>/tmp/capture.tar
 ```
 
 Run the same checks as CI:
