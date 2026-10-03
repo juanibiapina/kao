@@ -474,6 +474,74 @@ fn streams_capture_on_fd_three_and_holds_the_lock_until_output_finishes() {
     assert_eq!(repo.read("duck.txt"), format!("{after}second\n"));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn reports_capture_failure_and_retains_available_artifacts() {
+    use std::fs;
+
+    let repo = Repository::new("duck pond");
+    let root = repo.canonical_path();
+    repo.write("a-good.txt", "before\n");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add files");
+    fs::write(root.parent().unwrap().join("outside.txt"), b"outside\n").unwrap();
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run",
+        "--",
+        "bash",
+        "-c",
+        "printf 'after\\n' > a-good.txt; rm duck.txt; ln -s ../outside.txt duck.txt",
+    ]);
+    assert_eq!(status.code(), Some(125));
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(
+        result["command"]["exit_code"], 0,
+        "the command succeeded even though capture failed"
+    );
+    assert_eq!(result["capture"]["complete"], false);
+    assert!(
+        result["capture"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported file type")
+    );
+    let retained = std::path::PathBuf::from(
+        stderr
+            .split("artifacts retained at ")
+            .nth(1)
+            .expect("capture error must identify retained artifacts")
+            .trim(),
+    );
+    assert_eq!(
+        fs::read(retained.join("snapshot/duck.txt")).unwrap(),
+        b"quack\n"
+    );
+    assert_eq!(
+        fs::read(retained.join("before/a-good.txt")).unwrap(),
+        b"before\n"
+    );
+    assert_eq!(
+        fs::read(retained.join("after/a-good.txt")).unwrap(),
+        b"after\n"
+    );
+    assert_eq!(fs::read(retained.join("capture.tar")).unwrap(), capture);
+    assert_eq!(repo.read("a-good.txt"), "after\n");
+    assert_eq!(
+        fs::read(root.parent().unwrap().join("outside.txt")).unwrap(),
+        b"outside\n"
+    );
+    assert!(
+        fs::symlink_metadata(root.join("duck.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let (status, _, stderr, capture) = repo.capture(&["run", "--", "true"]);
+    assert!(status.success(), "failure must release the lock: {stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
