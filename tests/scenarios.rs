@@ -698,6 +698,53 @@ fn reports_empty_net_changes_without_resetting_dirty_files() {
     assert_eq!(repo.read("cache.txt"), "updated cache\n");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn cleans_up_snapshots_without_following_ignored_symlinks() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let repo = Repository::new("duck pond");
+    let root = repo.canonical_path();
+    let parent = root.parent().unwrap();
+    let protected = parent.join("protected");
+    fs::create_dir(&protected).unwrap();
+    fs::write(protected.join("outside.txt"), b"keep\n").unwrap();
+    repo.write("duck.txt", "quack\n");
+    repo.write(".gitignore", "dependencies/\n");
+    repo.commit("Add files");
+    fs::create_dir(root.join("dependencies")).unwrap();
+    symlink(&protected, root.join("dependencies/outside")).unwrap();
+    let directories = || {
+        let mut paths: Vec<_> = fs::read_dir(parent)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+        paths
+    };
+    let before = directories();
+    let (status, _, stderr, capture) = repo.capture(&["run", "--", "true"]);
+    assert!(status.success(), "{stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    assert_eq!(
+        directories(),
+        before,
+        "successful captures must remove their snapshots before returning"
+    );
+    assert_eq!(fs::read(protected.join("outside.txt")).unwrap(), b"keep\n");
+    assert!(
+        fs::symlink_metadata(root.join("dependencies/outside"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(repo.status(), "");
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");

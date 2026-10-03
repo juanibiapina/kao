@@ -80,8 +80,8 @@ fn lock_repository(git_dir: &Path) -> Result<File> {
     }
 }
 
-fn scoped_paths(root: &Path, candidates: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>> {
-    if candidates.is_empty() {
+fn scoped_paths(root: &Path, candidates: Option<&BTreeSet<PathBuf>>) -> Result<BTreeSet<PathBuf>> {
+    if candidates.is_some_and(BTreeSet::is_empty) {
         return Ok(BTreeSet::new());
     }
     let mut command = git(root);
@@ -93,7 +93,7 @@ fn scoped_paths(root: &Path, candidates: &BTreeSet<PathBuf>) -> Result<BTreeSet<
         "--exclude-standard",
         "--",
     ]);
-    for path in candidates {
+    for path in candidates.into_iter().flatten() {
         let mut literal = OsString::from(":(literal)");
         literal.push(path);
         command.arg(literal);
@@ -105,6 +105,46 @@ fn scoped_paths(root: &Path, candidates: &BTreeSet<PathBuf>) -> Result<BTreeSet<
         .filter(|path| !path.is_empty())
         .map(|path| PathBuf::from(OsStr::from_bytes(path)))
         .collect())
+}
+
+struct Snapshot {
+    directory: PathBuf,
+    scope: BTreeSet<PathBuf>,
+}
+
+impl Snapshot {
+    fn create(root: &Path, directory: PathBuf) -> Result<Self> {
+        let scope = scoped_paths(root, None)?;
+        fs::create_dir(&directory)?;
+        let entries: BTreeSet<_> = scope
+            .iter()
+            .filter_map(|path| path.components().next())
+            .map(|entry| PathBuf::from(entry.as_os_str()))
+            .collect();
+        for entry in entries {
+            let source = root.join(&entry);
+            match fs::symlink_metadata(&source) {
+                Ok(_) => clone_path(&source, &directory.join(&entry))
+                    .map_err(|error| format!("mandatory copy-on-write clone failed: {error}"))?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(Self { directory, scope })
+    }
+
+    fn candidates(&self, changed: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+        let mut paths = BTreeSet::new();
+        for changed in changed {
+            for path in self.scope.range(changed.clone()..) {
+                if !path.starts_with(changed) {
+                    break;
+                }
+                paths.insert(path.clone());
+            }
+        }
+        paths
+    }
 }
 
 fn freeze(source: &Path, destination: &Path) -> Result<Option<(Vec<u8>, u32)>> {
@@ -236,7 +276,7 @@ fn append(archive: &mut tar::Builder<File>, name: &str, contents: &[u8]) -> Resu
 
 fn capture_files(
     root: &Path,
-    snapshot: &Path,
+    snapshot: &Snapshot,
     artifacts: &Path,
     watcher: Watcher,
 ) -> Result<CapturedFiles> {
@@ -246,8 +286,8 @@ fn capture_files(
         .filter_map(|path| path.strip_prefix(root).ok().map(Path::to_path_buf))
         .filter(|path| !path.as_os_str().is_empty() && !path.starts_with(".git"))
         .collect();
-    let mut paths = scoped_paths(snapshot, &candidates)?;
-    paths.extend(scoped_paths(root, &candidates)?);
+    let mut paths = snapshot.candidates(&candidates);
+    paths.extend(scoped_paths(root, Some(&candidates))?);
     let before_dir = artifacts.join("before");
     let after_dir = artifacts.join("after");
     fs::create_dir(&before_dir)?;
@@ -260,8 +300,18 @@ fn capture_files(
             .to_str()
             .ok_or("capture paths must be UTF-8")?
             .to_owned();
-        let before = freeze(&snapshot.join(&path), &before_dir.join(&path))?;
-        let after = freeze(&root.join(&path), &after_dir.join(&path))?;
+        let before_path = snapshot.directory.join(&path);
+        let after_path = root.join(&path);
+        if fs::symlink_metadata(&before_path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && fs::symlink_metadata(&after_path)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && fs::read_link(&before_path)? == fs::read_link(&after_path)?
+        {
+            continue;
+        }
+        let before = freeze(&before_path, &before_dir.join(&path))?;
+        let after = freeze(&after_path, &after_dir.join(&path))?;
         if before == after {
             if before.is_some() {
                 fs::remove_file(before_dir.join(&path))?;
@@ -313,9 +363,7 @@ pub fn run(args: &[OsString]) -> Result<i32> {
         .to_string_lossy()
         .into_owned();
     let watcher = Watcher::start(&root, &git_dir)?;
-    let snapshot = artifacts.path().join("snapshot");
-    clone_path(&root, &snapshot)
-        .map_err(|error| format!("mandatory copy-on-write directory clone failed: {error}"))?;
+    let snapshot = Snapshot::create(&root, artifacts.path().join("snapshot"))?;
     let command = Command::new(&args[2])
         .args(&args[3..])
         .current_dir(&cwd)

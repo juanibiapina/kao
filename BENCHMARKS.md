@@ -21,4 +21,8 @@ Measured locally before optimization:
 
 Temporary stage timing identified snapshot cleanup at roughly 85 ms per invocation; directory cloning took roughly 15 ms. These results include process startup and cleanup, but no lock contention. They describe this fixture and machine, not a latency guarantee for arbitrary repositories.
 
+## Scoped snapshots
+
+Cloning only top-level entries containing tracked or nonignored files reduced median added overhead to 116.081 ms for no changes, 127.551 ms for one file, and 129.199 ms for eight files in a six-sample comparison. Git metadata and wholly ignored top-level directories are excluded from snapshots. Ignored descendants of a cloned directory can still be included. The reconstruction and error-recovery tests pass with this implementation.
+
 Use `--max-overhead-ms NUMBER` to assert a median overhead budget for all three cases. The benchmark validates captures before checking the budget.
