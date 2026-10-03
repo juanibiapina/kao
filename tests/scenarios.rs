@@ -657,6 +657,47 @@ fn truncated_streams_cannot_supply_a_final_capture_manifest() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn reports_empty_net_changes_without_resetting_dirty_files() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "committed\n");
+    repo.write(".gitignore", "cache.txt\n");
+    repo.commit("Add files");
+    repo.write("duck.txt", "dirty\n");
+    repo.write("untracked.txt", "private\n");
+    repo.write("cache.txt", "cache\n");
+    let before_status = repo.status();
+    let mut previous_operation = String::new();
+    for script in [
+        "true",
+        "printf 'temporary\\n' > duck.txt; printf 'dirty\\n' > duck.txt; touch untracked.txt; mkdir transient; printf 'temporary\\n' > transient/file; rm -r transient; printf 'updated cache\\n' > cache.txt",
+    ] {
+        let (status, stdout, stderr, capture) = repo.capture(&["run", "--", "bash", "-c", script]);
+        assert!(status.success(), "{stderr}");
+        assert_eq!(stdout, "");
+        assert_eq!(stderr, "");
+        let (files, result) = support::read_capture(&capture);
+        assert_eq!(result["capture"]["complete"], true);
+        assert_eq!(result["command"]["exit_code"], 0);
+        assert!(result["files"].as_array().unwrap().is_empty());
+        assert!(files["changes.patch"].is_empty());
+        assert_eq!(
+            files.len(),
+            2,
+            "no-change captures need only patch and manifest"
+        );
+        let operation = result["operation_id"].as_str().unwrap();
+        assert!(!operation.is_empty());
+        assert_ne!(operation, previous_operation);
+        previous_operation = operation.to_owned();
+        assert_eq!(repo.read("duck.txt"), "dirty\n");
+        assert_eq!(repo.read("untracked.txt"), "private\n");
+        assert_eq!(repo.status(), before_status);
+    }
+    assert_eq!(repo.read("cache.txt"), "updated cache\n");
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
