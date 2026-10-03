@@ -327,6 +327,95 @@ fn captures_additions_deletions_and_replacements_from_dirty_working_bytes() {
     assert_eq!(repo.status(), before_status);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn captures_reversible_binary_and_mode_changes() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repository::new("duck pond");
+    let root = repo.canonical_path();
+    fs::write(root.join("binary.dat"), b"\0old binary\xff\n").unwrap();
+    fs::write(root.join("deleted.dat"), b"\0deleted\xfe").unwrap();
+    repo.write("script.sh", "#!/bin/sh\nexit 0\n");
+    fs::set_permissions(root.join("script.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+    repo.commit("Add binary files and script");
+
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run", "--", "bash", "-c",
+        "printf '\\000new binary\\377' > binary.dat; printf '\\000created\\376' > created.dat; rm deleted.dat; chmod +x script.sh",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let changes = result["files"].as_array().unwrap();
+    assert_eq!(changes.len(), 4);
+    for (path, before, after) in [
+        (
+            "binary.dat",
+            Some(b"\0old binary\xff\n".as_slice()),
+            Some(b"\0new binary\xff".as_slice()),
+        ),
+        ("deleted.dat", Some(b"\0deleted\xfe".as_slice()), None),
+        ("created.dat", None, Some(b"\0created\xfe".as_slice())),
+    ] {
+        let change = changes
+            .iter()
+            .find(|change| change["path"] == path)
+            .unwrap();
+        assert_eq!(
+            change["before_sha256"],
+            before
+                .map(|bytes| serde_json::json!(format!("{:x}", Sha256::digest(bytes))))
+                .unwrap_or(serde_json::Value::Null)
+        );
+        assert_eq!(
+            change["after_sha256"],
+            after
+                .map(|bytes| serde_json::json!(format!("{:x}", Sha256::digest(bytes))))
+                .unwrap_or(serde_json::Value::Null)
+        );
+        assert!(
+            change["after_blob"].is_null(),
+            "binary contents must be supplied by the patch"
+        );
+    }
+    let patch = std::str::from_utf8(&files["changes.patch"]).unwrap();
+    assert_eq!(patch.matches("GIT binary patch").count(), 3);
+    assert!(patch.contains("old mode 100644\nnew mode 100755\n"));
+    assert_eq!(
+        fs::metadata(root.join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read(root.join("binary.dat")).unwrap(),
+        b"\0new binary\xff"
+    );
+    repo.reverse_patch(&files["changes.patch"]);
+    assert_eq!(
+        fs::read(root.join("binary.dat")).unwrap(),
+        b"\0old binary\xff\n"
+    );
+    assert_eq!(
+        fs::read(root.join("deleted.dat")).unwrap(),
+        b"\0deleted\xfe"
+    );
+    assert!(!root.join("created.dat").exists());
+    assert_eq!(
+        fs::metadata(root.join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert_eq!(repo.status(), "");
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
