@@ -102,6 +102,26 @@ fn finish(
 }
 
 #[cfg(target_os = "macos")]
+pub fn read_pipe_chunk(reader: &mut std::io::PipeReader, limit: usize) -> Vec<u8> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(
+        unsafe { libc::poll(&mut descriptor, 1, 10_000) },
+        1,
+        "capture pipe timed out"
+    );
+    let mut bytes = vec![0; limit];
+    let count = reader.read(&mut bytes).unwrap();
+    bytes.truncate(count);
+    bytes
+}
+
+#[cfg(target_os = "macos")]
 pub struct RunningCapture {
     child: std::process::Child,
     logs: std::path::PathBuf,
@@ -158,6 +178,11 @@ impl RunningCapture {
             .unwrap()
             .write_all(b"continue\n")
             .unwrap();
+    }
+
+    pub fn finish_stream(self, capture: Vec<u8>) -> (ExitStatus, String, String, Vec<u8>) {
+        fs::write(self.logs.join("capture.tar"), capture).unwrap();
+        self.finish()
     }
 
     pub fn finish(mut self) -> (ExitStatus, String, String, Vec<u8>) {
@@ -263,6 +288,42 @@ impl Repository {
         configure(&logs, &mut command);
         let child = command.spawn().expect("spawn concurrent Kao invocation");
         RunningCapture { child, logs }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn spawn_pipe_capture(
+        &self,
+        name: &str,
+        args: &[&str],
+    ) -> (RunningCapture, std::io::PipeReader) {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+
+        let logs = self.root.join(name);
+        fs::create_dir(&logs).unwrap();
+        let (reader, writer) = std::io::pipe().unwrap();
+        let descriptor = writer.as_raw_fd();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kao"));
+        command
+            .current_dir(&self.path)
+            .args(args)
+            .stdin(Stdio::null())
+            .process_group(0);
+        configure(&logs, &mut command);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(descriptor, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if descriptor != 3 {
+                    libc::close(descriptor);
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("spawn Kao with capture pipe");
+        drop(writer);
+        (RunningCapture { child, logs }, reader)
     }
 
     #[cfg(target_os = "macos")]

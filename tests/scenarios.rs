@@ -416,6 +416,64 @@ fn captures_reversible_binary_and_mode_changes() {
     assert_eq!(repo.status(), "");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn streams_capture_on_fd_three_and_holds_the_lock_until_output_finishes() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let after = "honk\n".repeat(200_000);
+    let (mut first, mut reader) = repo.spawn_pipe_capture("stream", &[
+        "run", "--", "bash", "-c",
+        "if [ -e /dev/fd/3 ]; then printf 'FD 3 leaked\\n' >&2; exit 9; fi; awk 'BEGIN {for (i=0;i<200000;i++) print \"honk\"}' > duck.txt; printf 'capture ready\\n'; printf 'command stderr\\n' >&2",
+    ]);
+    first.wait_for_output("capture ready\n");
+    let mut capture = support::read_pipe_chunk(&mut reader, 512);
+    assert_eq!(capture.len(), 512, "Kao must begin emitting the archive");
+    let mut second = repo.spawn_capture(
+        "waiting",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'second started\\n'; printf 'second\\n' >> duck.txt",
+        ],
+    );
+    second.assert_waiting("second started\n");
+    assert_eq!(repo.read("duck.txt"), after);
+    loop {
+        let bytes = support::read_pipe_chunk(&mut reader, 65536);
+        if bytes.is_empty() {
+            break;
+        }
+        capture.extend(bytes);
+    }
+    let (status, stdout, stderr, capture) = first.finish_stream(capture);
+    assert!(status.success());
+    assert_eq!(stdout, "capture ready\n");
+    assert_eq!(stderr, "command stderr\n");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let change = &result["files"][0];
+    assert_eq!(
+        change["after_sha256"],
+        format!("{:x}", Sha256::digest(after.as_bytes()))
+    );
+    assert_eq!(
+        files[change["after_blob"].as_str().unwrap()],
+        after.as_bytes()
+    );
+    let (status, _, stderr, capture) = second.finish();
+    assert!(status.success(), "{stderr}");
+    let (_, second_result) = support::read_capture(&capture);
+    assert_eq!(
+        second_result["files"][0]["before_sha256"],
+        change["after_sha256"]
+    );
+    assert_eq!(repo.read("duck.txt"), format!("{after}second\n"));
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
