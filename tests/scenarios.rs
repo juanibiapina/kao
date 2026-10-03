@@ -629,6 +629,34 @@ fn rejects_unwritable_fd_three_before_executing_the_command() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn truncated_streams_cannot_supply_a_final_capture_manifest() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let (status, _, stderr, capture) =
+        repo.capture(&["run", "--", "bash", "-c", "printf 'honk\\n' > duck.txt"]);
+    assert!(status.success(), "{stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let mut archive = tar::Archive::new(capture.as_slice());
+    let manifest = archive
+        .entries()
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.path().unwrap() == std::path::Path::new("result.json"))
+        .unwrap();
+    let manifest_start = manifest.raw_header_position() as usize;
+    let manifest_end = (manifest.raw_file_position() + manifest.size()) as usize;
+    for cut in [0, 512, manifest_start, manifest_end - 1] {
+        assert!(
+            std::panic::catch_unwind(|| support::read_capture(&capture[..cut])).is_err(),
+            "truncated output at {cut} must not be accepted as a finalized capture"
+        );
+    }
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");
