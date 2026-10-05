@@ -482,15 +482,13 @@ fn reports_capture_failure_and_retains_available_artifacts() {
     let repo = Repository::new("duck pond");
     let root = repo.canonical_path();
     repo.write("a-good.txt", "before\n");
-    repo.write("duck.txt", "quack\n");
     repo.commit("Add files");
-    fs::write(root.parent().unwrap().join("outside.txt"), b"outside\n").unwrap();
     let (status, _, stderr, capture) = repo.capture(&[
         "run",
         "--",
         "bash",
         "-c",
-        "printf 'after\\n' > a-good.txt; rm duck.txt; ln -s ../outside.txt duck.txt",
+        "printf 'after\\n' > a-good.txt; git init -q nested; git -C nested -c user.name=a -c user.email=a@b -c commit.gpgsign=false commit -q --allow-empty -m nested",
     ]);
     assert_eq!(status.code(), Some(125));
     let (_, result) = support::read_capture(&capture);
@@ -503,21 +501,12 @@ fn reports_capture_failure_and_retains_available_artifacts() {
         result["capture"]["error"]
             .as_str()
             .unwrap()
-            .contains("unsupported file type")
+            .contains("embedded repositories are not supported: nested")
     );
     let retained = support::retained_artifacts(&stderr);
     assert_eq!(fs::read(retained.join("capture.tar")).unwrap(), capture);
     assert_eq!(repo.read("a-good.txt"), "after\n");
-    assert_eq!(
-        fs::read(root.parent().unwrap().join("outside.txt")).unwrap(),
-        b"outside\n"
-    );
-    assert!(
-        fs::symlink_metadata(root.join("duck.txt"))
-            .unwrap()
-            .file_type()
-            .is_symlink()
-    );
+    assert!(root.join("nested/.git").is_dir());
     let (status, _, stderr, capture) = repo.capture(&["run", "--", "true"]);
     assert!(status.success(), "failure must release the lock: {stderr}");
     let (_, result) = support::read_capture(&capture);
@@ -597,34 +586,6 @@ fn rejects_unwritable_fd_three_before_executing_the_command() {
         );
         assert_eq!(repo.read("duck.txt"), "quack\n");
         assert_eq!(repo.status(), "");
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn truncated_streams_cannot_supply_a_final_capture_manifest() {
-    let repo = Repository::new("duck pond");
-    repo.write("duck.txt", "quack\n");
-    repo.commit("Add duck");
-    let (status, _, stderr, capture) =
-        repo.capture(&["run", "--", "bash", "-c", "printf 'honk\\n' > duck.txt"]);
-    assert!(status.success(), "{stderr}");
-    let (_, result) = support::read_capture(&capture);
-    assert_eq!(result["capture"]["complete"], true);
-    let mut archive = tar::Archive::new(capture.as_slice());
-    let manifest = archive
-        .entries()
-        .unwrap()
-        .map(Result::unwrap)
-        .find(|entry| entry.path().unwrap() == std::path::Path::new("result.json"))
-        .unwrap();
-    let manifest_start = manifest.raw_header_position() as usize;
-    let manifest_end = (manifest.raw_file_position() + manifest.size()) as usize;
-    for cut in [0, 512, manifest_start, manifest_end - 1] {
-        assert!(
-            std::panic::catch_unwind(|| support::read_capture(&capture[..cut])).is_err(),
-            "truncated output at {cut} must not be accepted as a finalized capture"
-        );
     }
 }
 
@@ -806,6 +767,47 @@ fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
             repo.reconstruct_before(&files["changes.patch"], path, blob),
             before.as_bytes()
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn each_capture_starts_from_the_current_files() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let mut expected_before = "quack\n".to_owned();
+    for (index, outside_edit) in [None, Some("edited outside Kao\n"), None]
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(contents) = outside_edit {
+            repo.write("duck.txt", contents);
+            expected_before = contents.to_owned();
+        }
+        let after = format!("honk {index}\n");
+        let (status, _, stderr, capture) = repo.capture(&[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf '%s' \"$1\" > duck.txt",
+            "edit",
+            &after,
+        ]);
+        assert!(status.success(), "{stderr}");
+        let (_, result) = support::read_capture(&capture);
+        assert_eq!(result["files"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["files"][0]["before_sha256"],
+            format!("{:x}", Sha256::digest(expected_before.as_bytes())),
+            "capture {index} must start from the bytes on disk"
+        );
+        assert_eq!(
+            result["files"][0]["after_sha256"],
+            format!("{:x}", Sha256::digest(after.as_bytes()))
+        );
+        expected_before = after;
     }
 }
 

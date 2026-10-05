@@ -1,9 +1,7 @@
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
-mod native;
-#[cfg(target_os = "macos")]
-mod watcher;
+mod snapshot;
 
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
