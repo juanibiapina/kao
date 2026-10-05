@@ -258,14 +258,46 @@ impl Repository {
         ]);
     }
 
-    pub fn kao(&self, args: &[&str]) -> String {
-        run(
-            &self.root,
-            Command::new(env!("CARGO_BIN_EXE_kao"))
-                .current_dir(&self.path)
-                .args(args),
+    pub fn kao_outcome(
+        &self,
+        args: &[&str],
+        path_prefix: Option<&Path>,
+    ) -> (ExitStatus, String, String) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kao"));
+        command.current_dir(&self.path).args(args);
+        if let Some(prefix) = path_prefix {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![prefix.to_path_buf()];
+            paths.extend(std::env::split_paths(&path));
+            command.env("PATH", std::env::join_paths(paths).unwrap());
+        }
+        execute(&self.root, &mut command)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn fake_git(&self, version: &str) -> std::path::PathBuf {
+        let directory = self.root.join("fake-git");
+        fs::create_dir_all(&directory).unwrap();
+        let real = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
         )
-        .1
+        .unwrap();
+        let script = directory.join("git");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'git version {version}'; exit 0; fi\nexec '{}' \"$@\"\n",
+                real.trim()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        directory
     }
 
     #[cfg(target_os = "macos")]

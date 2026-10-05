@@ -110,10 +110,7 @@ fn append(archive: &mut tar::Builder<File>, name: &str, contents: &[u8]) -> Resu
     Ok(())
 }
 
-pub fn run(args: &[OsString]) -> Result<i32> {
-    if args.len() < 3 || args[0] != "run" || args[1] != "--" {
-        return Err("usage: kao run -- command [args...] 3>capture.tar".into());
-    }
+pub fn run(command: &[OsString]) -> Result<i32> {
     check_git_version()?;
     let mut output = result_output()?;
     let cwd = std::env::current_dir()?.canonicalize()?;
@@ -133,8 +130,8 @@ pub fn run(args: &[OsString]) -> Result<i32> {
         .into_owned();
     let before = workspace.snapshot()?;
     fs::write(artifacts.path().join("before-tree"), &before.0)?;
-    let command = Command::new(&args[2])
-        .args(&args[3..])
+    let command = Command::new(&command[0])
+        .args(&command[1..])
         .current_dir(&cwd)
         .status();
     let command_result = match &command {

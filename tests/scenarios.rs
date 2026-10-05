@@ -881,12 +881,41 @@ fn captures_symlink_changes_without_touching_their_targets() {
 }
 
 #[test]
-fn kao_says_hello_to_a_duck() {
+fn rejects_malformed_invocations_with_usage() {
     let repo = Repository::new("duck pond");
     repo.write("duck.txt", "quack\n");
     repo.commit("Add duck");
-
-    assert_eq!(repo.kao(&[]), "Hello, world!\n");
-    assert_eq!(repo.read("duck.txt"), "quack\n");
+    for args in [
+        &[][..],
+        &["frobnicate"][..],
+        &["run"][..],
+        &["run", "--"][..],
+        &["run", "touch", "duck.txt"][..],
+    ] {
+        let (status, stdout, stderr) = repo.kao_outcome(args, None);
+        assert_eq!(status.code(), Some(125), "{args:?}");
+        assert_eq!(stdout, "", "{args:?}");
+        assert!(stderr.contains("usage: kao run -- "), "{args:?}: {stderr}");
+    }
     assert_eq!(repo.status(), "");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn requires_a_git_version_with_attribute_source_support() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let fake = repo.fake_git("2.40.1");
+    let (status, stdout, stderr) = repo.kao_outcome(
+        &["run", "--", "bash", "-c", "printf 'honk\\n' > duck.txt"],
+        Some(&fake),
+    );
+    assert_eq!(status.code(), Some(125));
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("Kao requires Git 2.41 or newer; found 2.40.1"),
+        "{stderr}"
+    );
+    assert_eq!(repo.read("duck.txt"), "quack\n");
 }
