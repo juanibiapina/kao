@@ -214,12 +214,20 @@ pub struct Repository {
 
 impl Repository {
     pub fn new(name: &str) -> Self {
+        Self::with_object_format(name, "sha1")
+    }
+
+    pub fn with_object_format(name: &str, format: &str) -> Self {
         let root = tempfile::tempdir().unwrap().keep();
         eprintln!("fixture retained on failure: {}", root.display());
         let path = root.join(name);
         fs::create_dir(&path).unwrap();
         let repo = Self { root, path };
-        repo.git(&["init", "--initial-branch=main"]);
+        repo.git(&[
+            "init",
+            "--initial-branch=main",
+            &format!("--object-format={format}"),
+        ]);
         repo
     }
 
@@ -246,19 +254,9 @@ impl Repository {
         ]);
     }
 
-    pub fn kao_outcome(
-        &self,
-        args: &[&str],
-        path_prefix: Option<&Path>,
-    ) -> (ExitStatus, String, String) {
+    pub fn kao_outcome(&self, args: &[&str]) -> (ExitStatus, String, String) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kao"));
         command.current_dir(&self.path).args(args);
-        if let Some(prefix) = path_prefix {
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            let mut paths = vec![prefix.to_path_buf()];
-            paths.extend(std::env::split_paths(&path));
-            command.env("PATH", std::env::join_paths(paths).unwrap());
-        }
         execute(&self.root, &mut command)
     }
     pub fn kao_in(&self, cwd: &Path, args: &[&str], input: &[u8]) -> (ExitStatus, String, String) {
@@ -291,7 +289,7 @@ impl Repository {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'git version {version}'; exit 0; fi\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'git version {version}'; exit 0; fi\ncase \"$1\" in --attr-source=*) echo \"unknown option: $1\" >&2; exit 129;; esac\nexec '{}' \"$@\"\n",
                 real.trim()
             ),
         )
@@ -324,16 +322,30 @@ impl Repository {
         self.capture_from(&self.path, args)
     }
     pub fn capture_from(&self, cwd: &Path, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
+        self.capture_with_path(cwd, None, args)
+    }
+
+    pub fn capture_with_path(
+        &self,
+        cwd: &Path,
+        path_prefix: Option<&Path>,
+        args: &[&str],
+    ) -> (ExitStatus, String, String, Vec<u8>) {
         let capture = self.root.join("capture.tar");
-        let (status, stdout, stderr) = execute(
-            &self.root,
-            Command::new("bash")
-                .current_dir(cwd)
-                .args(["-c", "exec 3>\"$1\"; shift; exec \"$@\"", "capture"])
-                .arg(&capture)
-                .arg(env!("CARGO_BIN_EXE_kao"))
-                .args(args),
-        );
+        let mut command = Command::new("bash");
+        command
+            .current_dir(cwd)
+            .args(["-c", "exec 3>\"$1\"; shift; exec \"$@\"", "capture"])
+            .arg(&capture)
+            .arg(env!("CARGO_BIN_EXE_kao"))
+            .args(args);
+        if let Some(prefix) = path_prefix {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = vec![prefix.to_path_buf()];
+            paths.extend(std::env::split_paths(&path));
+            command.env("PATH", std::env::join_paths(paths).unwrap());
+        }
+        let (status, stdout, stderr) = execute(&self.root, &mut command);
         (status, stdout, stderr, fs::read(capture).unwrap())
     }
     pub fn spawn_capture(&self, name: &str, args: &[&str]) -> RunningCapture {

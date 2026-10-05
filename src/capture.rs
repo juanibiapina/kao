@@ -10,7 +10,7 @@ use std::process::{Command, ExitStatus};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::snapshot::{Change, Result, Workspace, check_git_version};
+use crate::snapshot::{Change, Result, Workspace};
 
 const REGULAR_FILE: u32 = 0o100000;
 
@@ -129,7 +129,6 @@ pub fn lock(command: &[OsString]) -> Result<i32> {
 }
 
 pub fn run(command: &[OsString]) -> Result<i32> {
-    check_git_version()?;
     let mut output = result_output()?;
     let cwd = std::env::current_dir()?.canonicalize()?;
     let workspace = Workspace::discover(&cwd)?;

@@ -969,6 +969,25 @@ fn kao_lock_requires_a_git_working_tree() {
 }
 
 #[test]
+fn captures_changes_in_sha256_repositories() {
+    let repo = Repository::with_object_format("duck pond", "sha256");
+    repo.write("duck.txt", "quack\r\n");
+    repo.commit("Add duck");
+    let (status, _, stderr, capture) =
+        repo.capture(&["run", "--", "bash", "-c", "printf 'honk\\r\\n' > duck.txt"]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    assert_eq!(result["files"][0]["path"], "duck.txt");
+    assert_eq!(
+        files[result["files"][0]["after_blob"].as_str().unwrap()],
+        b"honk\r\n"
+    );
+    repo.reverse_patch(&files["changes.patch"]);
+    assert_eq!(repo.read("duck.txt"), "quack\r\n");
+}
+
+#[test]
 fn rejects_malformed_invocations_with_usage() {
     let repo = Repository::new("duck pond");
     repo.write("duck.txt", "quack\n");
@@ -983,7 +1002,7 @@ fn rejects_malformed_invocations_with_usage() {
         &["lock", "--"][..],
         &["lock", "touch", "duck.txt"][..],
     ] {
-        let (status, stdout, stderr) = repo.kao_outcome(args, None);
+        let (status, stdout, stderr) = repo.kao_outcome(args);
         assert_eq!(status.code(), Some(125), "{args:?}");
         assert_eq!(stdout, "", "{args:?}");
         assert!(stderr.contains("usage: kao run -- "), "{args:?}: {stderr}");
@@ -996,9 +1015,10 @@ fn requires_a_git_version_with_attribute_source_support() {
     repo.write("duck.txt", "quack\n");
     repo.commit("Add duck");
     let fake = repo.fake_git("2.40.1");
-    let (status, stdout, stderr) = repo.kao_outcome(
-        &["run", "--", "bash", "-c", "printf 'honk\\n' > duck.txt"],
+    let (status, stdout, stderr, _) = repo.capture_with_path(
+        &repo.canonical_path(),
         Some(&fake),
+        &["run", "--", "bash", "-c", "printf 'honk\\n' > duck.txt"],
     );
     assert_eq!(status.code(), Some(125));
     assert_eq!(stdout, "");

@@ -93,6 +93,9 @@ with tempfile.TemporaryDirectory(prefix="kao-benchmark-") as temporary:
     ]
     report = {"tracked_files": args.files + 1, "ignored_files": args.files,
               "samples": args.samples, "cases": {}}
+    cold, changes = measure(root, "true", True, parent / "capture.tar", 0)
+    assert changes == 0
+    report["first_capture_ms"] = round(cold, 3)
     for name, script, expected_changes in cases:
         for _ in range(2):
             _, changes = measure(root, script, True, parent / "capture.tar", expected_changes)

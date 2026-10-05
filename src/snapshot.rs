@@ -17,7 +17,7 @@ pub struct Workspace {
     pub root: PathBuf,
     pub git_dir: PathBuf,
     pub common_dir: PathBuf,
-    empty_tree: std::cell::OnceCell<String>,
+    empty_tree: &'static str,
 }
 
 pub struct Tree(pub String);
@@ -91,15 +91,28 @@ fn read_path_file(path: &Path) -> Result<Option<PathBuf>> {
 
 impl Workspace {
     pub fn discover(cwd: &Path) -> Result<Self> {
-        let root = single_line(checked(
-            Command::new("git")
-                .current_dir(cwd)
-                .args(["rev-parse", "--show-toplevel"]),
-        )?);
-        if root.is_empty() {
-            return Err("Kao requires a Git working tree".into());
-        }
-        let root = PathBuf::from(OsString::from_vec(root)).canonicalize()?;
+        let output = single_line(checked(Command::new("git").current_dir(cwd).args([
+            "rev-parse",
+            "--show-object-format",
+            "--show-toplevel",
+        ]))?);
+        let newline = output
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or("Kao requires a Git working tree")?;
+        let (format, root) = (&output[..newline], &output[newline + 1..]);
+        let empty_tree = match format {
+            b"sha1" => "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            b"sha256" => "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+            other => {
+                return Err(format!(
+                    "unsupported object format: {}",
+                    String::from_utf8_lossy(other)
+                )
+                .into());
+            }
+        };
+        let root = PathBuf::from(OsString::from_vec(root.to_vec())).canonicalize()?;
         let dot_git = root.join(".git");
         let git_dir = if dot_git.is_dir() {
             dot_git
@@ -114,7 +127,7 @@ impl Workspace {
             root,
             git_dir,
             common_dir,
-            empty_tree: std::cell::OnceCell::new(),
+            empty_tree,
         })
     }
 
@@ -122,28 +135,9 @@ impl Workspace {
         self.git_dir.join("kao")
     }
 
-    fn empty_tree(&self) -> Result<&str> {
-        if self.empty_tree.get().is_none() {
-            let tree = String::from_utf8(single_line(checked(
-                Command::new("git").current_dir(&self.root).args([
-                    "hash-object",
-                    "-t",
-                    "tree",
-                    "/dev/null",
-                ]),
-            )?))?;
-            let _ = self.empty_tree.set(tree);
-        }
-        Ok(self
-            .empty_tree
-            .get()
-            .map(String::as_str)
-            .unwrap_or_default())
-    }
-
     fn git(&self) -> Result<Command> {
         let store = self.store();
-        let empty_tree = self.empty_tree()?.to_owned();
+        let empty_tree = self.empty_tree;
         let mut command = Command::new("git");
         command
             .current_dir(&self.root)
@@ -208,6 +202,7 @@ impl Workspace {
             Ok(tree) => Ok(Tree(String::from_utf8(tree)?)),
             Err(error) => {
                 self.reset_store()?;
+                check_git_version()?;
                 Err(format!("snapshot failed: {error}").into())
             }
         }
