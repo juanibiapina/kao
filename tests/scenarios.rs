@@ -846,6 +846,129 @@ fn captures_symlink_changes_without_touching_their_targets() {
 }
 
 #[test]
+fn kao_lock_waits_for_a_running_capture() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let mut capture = repo.spawn_capture(
+        "capture",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'capture started\\n'; read -r release",
+        ],
+    );
+    capture.wait_for_output("capture started\n");
+    let mut locked = repo.spawn_capture(
+        "locked",
+        &[
+            "lock",
+            "--",
+            "bash",
+            "-c",
+            "printf 'lock started\\n'; printf 'locked\\n' > duck.txt",
+        ],
+    );
+    locked.assert_waiting("lock started\n");
+    capture.release();
+    let (status, _, stderr, capture) = capture.finish();
+    assert!(status.success(), "{stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert!(
+        result["files"].as_array().unwrap().is_empty(),
+        "the later lock edit must not enter this capture"
+    );
+    let (status, stdout, stderr, _) = locked.finish();
+    assert!(status.success(), "{stderr}");
+    assert_eq!(stdout, "invoking Kao\nlock started\n");
+    assert_eq!(repo.read("duck.txt"), "locked\n");
+}
+
+#[test]
+fn kao_run_waits_for_kao_lock_and_excludes_its_changes() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let mut locked = repo.spawn_capture(
+        "locked",
+        &[
+            "lock",
+            "--",
+            "bash",
+            "-c",
+            "printf 'locked\\n' > duck.txt; printf 'lock started\\n'; read -r release",
+        ],
+    );
+    locked.wait_for_output("lock started\n");
+    let mut capture = repo.spawn_capture(
+        "capture",
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "printf 'capture started\\n'; printf 'run\\n' >> duck.txt",
+        ],
+    );
+    capture.assert_waiting("capture started\n");
+    locked.release();
+    let (status, _, stderr, _) = locked.finish();
+    assert!(status.success(), "{stderr}");
+    let (status, _, stderr, capture) = capture.finish();
+    assert!(status.success(), "{stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["files"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["files"][0]["before_sha256"],
+        format!("{:x}", Sha256::digest(b"locked\n")),
+        "the capture must start after the change made under kao lock"
+    );
+    assert_eq!(
+        result["files"][0]["after_sha256"],
+        format!("{:x}", Sha256::digest(b"locked\nrun\n"))
+    );
+}
+
+#[test]
+fn kao_lock_passes_through_input_output_and_exit_code() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let (status, stdout, stderr) = repo.kao_in(
+        &repo.canonical_path(),
+        &[
+            "lock",
+            "--",
+            "bash",
+            "-c",
+            "read -r line; printf 'out %s\\n' \"$line\"; printf 'err\\n' >&2; exit 7",
+        ],
+        b"duck\n",
+    );
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(stdout, "out duck\n");
+    assert_eq!(stderr, "err\n");
+}
+
+#[test]
+fn kao_lock_requires_a_git_working_tree() {
+    let repo = Repository::new("duck pond");
+    let outside = repo.outside();
+    let (status, stdout, stderr) = repo.kao_in(
+        &outside,
+        &["lock", "--", "bash", "-c", "printf 'ran\\n'; touch ran"],
+        b"",
+    );
+    assert_eq!(status.code(), Some(125));
+    assert_eq!(stdout, "");
+    assert!(stderr.starts_with("kao: "), "{stderr}");
+    assert!(!stderr.contains("usage"), "{stderr}");
+    assert!(!outside.join("ran").exists());
+}
+
+#[test]
 fn rejects_malformed_invocations_with_usage() {
     let repo = Repository::new("duck pond");
     repo.write("duck.txt", "quack\n");
@@ -856,6 +979,9 @@ fn rejects_malformed_invocations_with_usage() {
         &["run"][..],
         &["run", "--"][..],
         &["run", "touch", "duck.txt"][..],
+        &["lock"][..],
+        &["lock", "--"][..],
+        &["lock", "touch", "duck.txt"][..],
     ] {
         let (status, stdout, stderr) = repo.kao_outcome(args, None);
         assert_eq!(status.code(), Some(125), "{args:?}");

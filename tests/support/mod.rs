@@ -261,6 +261,21 @@ impl Repository {
         }
         execute(&self.root, &mut command)
     }
+    pub fn kao_in(&self, cwd: &Path, args: &[&str], input: &[u8]) -> (ExitStatus, String, String) {
+        let input_path = self.root.join("stdin.txt");
+        fs::write(&input_path, input).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kao"));
+        command
+            .current_dir(cwd)
+            .args(args)
+            .stdin(Stdio::from(File::open(input_path).unwrap()));
+        execute(&self.root, &mut command)
+    }
+
+    pub fn outside(&self) -> std::path::PathBuf {
+        self.root.clone()
+    }
+
     pub fn fake_git(&self, version: &str) -> std::path::PathBuf {
         let directory = self.root.join("fake-git");
         fs::create_dir_all(&directory).unwrap();

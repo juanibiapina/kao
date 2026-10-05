@@ -17,7 +17,7 @@ pub struct Workspace {
     pub root: PathBuf,
     pub git_dir: PathBuf,
     pub common_dir: PathBuf,
-    empty_tree: String,
+    empty_tree: std::cell::OnceCell<String>,
 }
 
 pub struct Tree(pub String);
@@ -110,16 +110,11 @@ impl Workspace {
         let common_dir = read_path_file(&git_dir.join("commondir"))?
             .unwrap_or_else(|| git_dir.clone())
             .canonicalize()?;
-        let empty_tree = String::from_utf8(single_line(checked(
-            Command::new("git")
-                .current_dir(&root)
-                .args(["hash-object", "-t", "tree", "/dev/null"]),
-        )?))?;
         Ok(Self {
             root,
             git_dir,
             common_dir,
-            empty_tree,
+            empty_tree: std::cell::OnceCell::new(),
         })
     }
 
@@ -127,8 +122,28 @@ impl Workspace {
         self.git_dir.join("kao")
     }
 
-    fn git(&self) -> Command {
+    fn empty_tree(&self) -> Result<&str> {
+        if self.empty_tree.get().is_none() {
+            let tree = String::from_utf8(single_line(checked(
+                Command::new("git").current_dir(&self.root).args([
+                    "hash-object",
+                    "-t",
+                    "tree",
+                    "/dev/null",
+                ]),
+            )?))?;
+            let _ = self.empty_tree.set(tree);
+        }
+        Ok(self
+            .empty_tree
+            .get()
+            .map(String::as_str)
+            .unwrap_or_default())
+    }
+
+    fn git(&self) -> Result<Command> {
         let store = self.store();
+        let empty_tree = self.empty_tree()?.to_owned();
         let mut command = Command::new("git");
         command
             .current_dir(&self.root)
@@ -139,7 +154,7 @@ impl Workspace {
                 self.common_dir.join("objects"),
             )
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .arg(format!("--attr-source={}", self.empty_tree));
+            .arg(format!("--attr-source={empty_tree}"));
         for setting in [
             "core.autocrlf=false",
             "core.safecrlf=false",
@@ -152,7 +167,7 @@ impl Workspace {
         ] {
             command.args(["-c", setting]);
         }
-        command
+        Ok(command)
     }
 
     pub fn bound_store(&self) -> Result<()> {
@@ -183,8 +198,11 @@ impl Workspace {
 
     pub fn snapshot(&self) -> Result<Tree> {
         fs::create_dir_all(self.store().join("objects"))?;
-        let tree = checked(self.git().args(["add", "-A"]))
-            .and_then(|_| checked(self.git().arg("write-tree")))
+        let tree = self
+            .git()
+            .and_then(|mut add| checked(add.args(["add", "-A"])))
+            .and_then(|_| self.git())
+            .and_then(|mut write| checked(write.arg("write-tree")))
             .map(single_line);
         match tree {
             Ok(tree) => Ok(Tree(String::from_utf8(tree)?)),
@@ -196,7 +214,7 @@ impl Workspace {
     }
 
     pub fn changes(&self, before: &Tree, after: &Tree) -> Result<(Vec<Change>, Vec<u8>)> {
-        let raw = checked(self.git().args([
+        let raw = checked(self.git()?.args([
             "diff-tree",
             "-r",
             "-z",
@@ -265,7 +283,7 @@ impl Workspace {
                 after,
             });
         }
-        let patch = checked(self.git().args([
+        let patch = checked(self.git()?.args([
             "diff",
             "--binary",
             "--no-renames",
@@ -284,7 +302,7 @@ impl Workspace {
 
     fn read_blobs(&self, ids: &[String]) -> Result<Vec<Vec<u8>>> {
         let mut child = self
-            .git()
+            .git()?
             .args(["cat-file", "--batch"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

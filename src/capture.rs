@@ -110,6 +110,24 @@ fn append(archive: &mut tar::Builder<File>, name: &str, contents: &[u8]) -> Resu
     Ok(())
 }
 
+fn exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1))
+}
+
+pub fn lock(command: &[OsString]) -> Result<i32> {
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let workspace = Workspace::discover(&cwd)?;
+    let _lock = lock_repository(&workspace.common_dir)?;
+    let status = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(&cwd)
+        .status()
+        .map_err(|error| format!("command could not start: {error}"))?;
+    Ok(exit_code(status))
+}
+
 pub fn run(command: &[OsString]) -> Result<i32> {
     check_git_version()?;
     let mut output = result_output()?;
@@ -190,7 +208,5 @@ pub fn run(command: &[OsString]) -> Result<i32> {
     artifacts.close()?;
     let status: ExitStatus =
         command.map_err(|error| format!("command could not start: {error}"))?;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)))
+    Ok(exit_code(status))
 }
