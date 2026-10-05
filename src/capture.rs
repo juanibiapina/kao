@@ -155,10 +155,9 @@ pub fn run(command: &[OsString]) -> Result<i32> {
         Ok(status) => json!({"exit_code": status.code(), "signal": status.signal()}),
         Err(error) => json!({"exit_code": null, "signal": null, "error": error.to_string()}),
     };
-    let captured = workspace.snapshot().and_then(|after| {
-        let (changes, patch) = workspace.changes(&before, &after)?;
-        describe(&workspace, changes, patch)
-    });
+    let captured = workspace
+        .changes_since(&before)
+        .and_then(|(changes, patch)| describe(&workspace, changes, patch));
     let (captured, error) = match captured {
         Ok(captured) => (captured, None),
         Err(error) => (CapturedFiles::default(), Some(error.to_string())),

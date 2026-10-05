@@ -190,49 +190,61 @@ impl Workspace {
         }
     }
 
-    pub fn snapshot(&self) -> Result<Tree> {
+    fn stage(&self) -> Result<()> {
         fs::create_dir_all(self.store().join("objects"))?;
-        let tree = self
+        let staged = self
             .git()
-            .and_then(|mut add| checked(add.args(["add", "-A"])))
-            .and_then(|_| self.git())
-            .and_then(|mut write| checked(write.arg("write-tree")))
-            .map(single_line);
+            .and_then(|mut add| checked(add.args(["add", "-A"])));
+        if let Err(error) = staged {
+            self.reset_store()?;
+            check_git_version()?;
+            return Err(format!("snapshot failed: {error}").into());
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<Tree> {
+        self.stage()?;
+        let tree = checked(self.git()?.arg("write-tree")).map(single_line);
         match tree {
             Ok(tree) => Ok(Tree(String::from_utf8(tree)?)),
             Err(error) => {
                 self.reset_store()?;
-                check_git_version()?;
                 Err(format!("snapshot failed: {error}").into())
             }
         }
     }
 
-    pub fn changes(&self, before: &Tree, after: &Tree) -> Result<(Vec<Change>, Vec<u8>)> {
-        let raw = checked(self.git()?.args([
-            "diff-tree",
-            "-r",
+    pub fn changes_since(&self, before: &Tree) -> Result<(Vec<Change>, Vec<u8>)> {
+        self.stage()?;
+        let output = checked(self.git()?.args([
+            "diff",
+            "--cached",
             "-z",
             "--raw",
+            "--patch",
+            "--no-abbrev",
+            "--binary",
             "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             &before.0,
-            &after.0,
         ]))?
         .stdout;
-        let mut records = raw.split(|byte| *byte == 0);
+        let mut position = 0;
         let mut listed = Vec::new();
-        while let Some(header) = records.next() {
-            if header.is_empty() {
-                continue;
-            }
-            let path = records.next().ok_or("malformed diff-tree output")?;
-            let header = std::str::from_utf8(header)?.trim_start_matches(':');
-            let fields: Vec<_> = header.split(' ').collect();
+        while output.get(position) == Some(&b':') {
+            let header = String::from_utf8(next_field(&output, &mut position)?.to_vec())?;
+            let path = String::from_utf8(next_field(&output, &mut position)?.to_vec())
+                .map_err(|_| "capture paths must be UTF-8")?;
+            let fields: Vec<_> = header.trim_start_matches(':').split(' ').collect();
             let [old_mode, new_mode, old_id, new_id, ..] = fields[..] else {
-                return Err("malformed diff-tree output".into());
+                return Err("malformed diff output".into());
             };
-            let path =
-                String::from_utf8(path.to_vec()).map_err(|_| "capture paths must be UTF-8")?;
             let old_mode = u32::from_str_radix(old_mode, 8)?;
             let new_mode = u32::from_str_radix(new_mode, 8)?;
             if old_mode == GITLINK || new_mode == GITLINK {
@@ -252,6 +264,10 @@ impl Workspace {
         if listed.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
+        if output.get(position) == Some(&0) {
+            position += 1;
+        }
+        let patch = output[position..].to_vec();
         let mut ids = Vec::new();
         for (_, old_mode, old_id, new_mode, new_id) in &listed {
             if *old_mode != 0 {
@@ -278,20 +294,6 @@ impl Workspace {
                 after,
             });
         }
-        let patch = checked(self.git()?.args([
-            "diff",
-            "--binary",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            "--no-relative",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            &before.0,
-            &after.0,
-        ]))?
-        .stdout;
         Ok((changes, patch))
     }
 
@@ -341,6 +343,16 @@ impl Workspace {
             Ok(fs::read(&path)?)
         }
     }
+}
+
+fn next_field<'a>(output: &'a [u8], position: &mut usize) -> Result<&'a [u8]> {
+    let start = *position;
+    let end = output[start..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("malformed diff output")?;
+    *position = start + end + 1;
+    Ok(&output[start..start + end])
 }
 
 fn directory_size(path: &Path) -> Result<u64> {

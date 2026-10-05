@@ -988,6 +988,50 @@ fn captures_changes_in_sha256_repositories() {
 }
 
 #[test]
+fn captures_files_with_names_git_must_quote() {
+    let repo = Repository::new("duck pond");
+    let names = [
+        "two words.txt",
+        "tab\there.txt",
+        ":colon.txt",
+        "ünïcode.txt",
+    ];
+    for name in names {
+        repo.write(name, "quack\n");
+    }
+    repo.commit("Add named files");
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run",
+        "--",
+        "bash",
+        "-c",
+        "for name in \"$@\"; do printf 'honk\\n' > \"$name\"; done",
+        "edit",
+        names[0],
+        names[1],
+        names[2],
+        names[3],
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    let mut paths: Vec<_> = result["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["path"].as_str().unwrap().to_owned())
+        .collect();
+    paths.sort();
+    let mut expected: Vec<_> = names.iter().map(|name| name.to_string()).collect();
+    expected.sort();
+    assert_eq!(paths, expected);
+    repo.reverse_patch(&files["changes.patch"]);
+    for name in names {
+        assert_eq!(repo.read(name), "quack\n", "{name}");
+    }
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
 fn rejects_malformed_invocations_with_usage() {
     let repo = Repository::new("duck pond");
     repo.write("duck.txt", "quack\n");
