@@ -1,11 +1,13 @@
 # Kao
 
-Kao (pronounced cow) is a command runner for agents.
+Kao (pronounced cow) is a command runner for agents. It runs a command in a Git working tree and reports the file changes that command made, as a Git patch.
 
 > [!WARNING]
-> Kao currently requires macOS and a Git working tree on an APFS filesystem.
+> Kao requires a Unix system (macOS or Linux) and Git 2.41 or newer.
 
 ## Usage
+
+### Capture a command's changes
 
 From a Git working tree:
 
@@ -13,9 +15,37 @@ From a Git working tree:
 kao run -- bash -c 'cargo fmt' 3>/tmp/capture.tar
 ```
 
-Commands run in the current directory with unchanged stdout and stderr. Descriptor 3 receives a tar archive with `changes.patch`, after-content files in `blobs/`, and a final `result.json` manifest. A caller using a pipe must read it while Kao runs.
+The command runs in the current directory with unchanged stdin, stdout, and stderr. Kao preserves its exit code. File descriptor 3 receives a tar archive containing:
 
-Kao also locks the repository so commands cannot run in parallel.
+- `changes.patch`: a Git binary patch from the files before the command to the files after it.
+- `blobs/<sha256>`: after contents of modified text files.
+- `result.json`: the manifest, written last. It lists each changed path with before and after SHA-256 hashes, plus the command outcome and whether the capture is complete.
+
+A caller reading descriptor 3 through a pipe must drain it while Kao runs. Kao closes descriptor 3 in the command it runs.
+
+Captured files are tracked files plus untracked files that `.gitignore` does not exclude. Kao records exact bytes: it ignores line-ending conversion and filters from `.gitattributes` and Git settings. Regular files, executable bits, and symlinks are supported. Changes involving submodules or embedded repositories make the capture incomplete.
+
+Kao exits with 125 when it cannot capture, when it cannot write the archive, or when it is invoked incorrectly. It reports the reason on stderr. When Kao has already run the command, it keeps the operation's files and prints their location.
+
+### Run a command under the lock without capture
+
+```sh
+kao lock -- deltoids edit <trace-id>
+```
+
+`kao lock` waits for the same lock as `kao run`, runs the command, and returns its exit code. It does not capture changes; use it for tools that record their own changes, such as the Deltoids edit and write tools. A change made under `kao lock` never appears in a `kao run` capture.
+
+### Locking
+
+`kao run` and `kao lock` hold one lock per repository (`.git/kao.lock`, shared by linked worktrees) while the command runs and until the capture is written. Concurrent invocations wait, and long-running commands block other Kao invocations. Editors and processes started outside Kao do not take the lock; their writes during a `kao run` command appear in that command's capture.
+
+## How it works
+
+Kao keeps a private Git index and object directory in `.git/kao/`, or in the worktree's Git directory for a linked worktree. Before the command, Kao stages the working tree into that private index and writes a tree. After the command, it stages again and diffs the index against the before tree. Your index, branches, and commits are never changed.
+
+The first capture in a working tree reads every file. Later captures only check file metadata and reread files that changed. Kao discards the private store when its objects exceed 256 MiB; the next capture rebuilds it.
+
+Each operation's files live in `.git/kao/operations/` while Kao runs and are removed on success.
 
 ## Development
 
