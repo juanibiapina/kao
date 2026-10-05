@@ -1,5 +1,6 @@
 mod support;
 use sha2::{Digest, Sha256};
+use std::fs;
 use support::Repository;
 #[test]
 fn captures_a_text_edit_without_redirecting_the_command() {
@@ -297,11 +298,13 @@ fn captures_additions_deletions_and_replacements_from_dirty_working_bytes() {
             .unwrap_or(serde_json::Value::Null);
         assert_eq!(change["before_sha256"], expected_before);
         assert_eq!(change["after_sha256"], expected_after);
-        if before.is_none() || after.is_none() {
-            assert!(
-                change["after_blob"].is_null(),
-                "patch must supply complete created/deleted text contents"
-            );
+        match after {
+            Some(text) => assert_eq!(
+                files[change["after_blob"].as_str().unwrap()],
+                text.as_bytes(),
+                "{path}"
+            ),
+            None => assert!(change["after_blob"].is_null(), "{path}"),
         }
     }
     assert_eq!(repo.read("duck.txt"), "replacement\n");
@@ -724,6 +727,7 @@ fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
     assert_eq!(result["capture"]["complete"], true);
     let changes = result["files"].as_array().unwrap();
     assert_eq!(changes.len(), 2);
+    let rebuilt = support::rebuild_before(&files, &result);
     for (path, before, after) in [
         ("duck.txt", "quack\r\nquack\r\n", "honk\r\nquack\r\n"),
         ("duck.up", "lower\n", "still lower\n"),
@@ -743,8 +747,8 @@ fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
         let blob = &files[change["after_blob"].as_str().unwrap()];
         assert_eq!(blob, after.as_bytes());
         assert_eq!(
-            repo.reconstruct_before(&files["changes.patch"], path, blob),
-            before.as_bytes()
+            rebuilt[path],
+            Some(("100644".to_owned(), before.as_bytes().to_vec()))
         );
     }
 }
@@ -1167,4 +1171,99 @@ fn hands_the_terminal_to_the_command() {
     assert_eq!(repo.read("got.txt"), "duck\n");
     let (_, result) = support::read_capture(&capture);
     assert_eq!(result["files"][0]["path"], "got.txt");
+}
+
+#[test]
+fn rebuilds_before_contents_from_the_archive_alone() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let repo = Repository::new("duck pond");
+    let root = repo.canonical_path();
+    repo.write("modified.txt", "quack\n");
+    repo.write("deleted.txt", "gone\r\nwithout final newline");
+    repo.write("mode-only.sh", "#!/bin/sh\n");
+    fs::set_permissions(root.join("mode-only.sh"), fs::Permissions::from_mode(0o644)).unwrap();
+    repo.write("becomes-link", "regular\n");
+    symlink("modified.txt", root.join("retargeted")).unwrap();
+    symlink("modified.txt", root.join("removed-link")).unwrap();
+    std::fs::write(root.join("binary.dat"), b"\0old binary").unwrap();
+    repo.commit("Add files");
+
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run", "--", "bash", "-c",
+        "printf 'honk\\n' > modified.txt; rm deleted.txt removed-link; chmod +x mode-only.sh; mkdir nested; printf 'created\\r\\nlast line' > nested/created.txt; printf '#!/bin/sh\\necho hi\\n' > created.sh; chmod +x created.sh; rm becomes-link; ln -s modified.txt becomes-link; ln -sfn deleted.txt retargeted; ln -s modified.txt created-link; printf '\\000new binary' > binary.dat; printf 'star\\n' > 'star*.txt'",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let entries = result["files"].as_array().unwrap();
+    let mode = |value: &serde_json::Value| value.as_str().map(str::to_owned);
+
+    let expected = [
+        ("modified.txt", Some("100644"), Some("100644"), true),
+        ("deleted.txt", Some("100644"), None, false),
+        ("mode-only.sh", Some("100644"), Some("100755"), true),
+        ("nested/created.txt", None, Some("100644"), true),
+        ("created.sh", None, Some("100755"), true),
+        ("star*.txt", None, Some("100644"), true),
+        ("becomes-link", Some("100644"), Some("120000"), false),
+        ("retargeted", Some("120000"), Some("120000"), false),
+        ("removed-link", Some("120000"), None, false),
+        ("created-link", None, Some("120000"), false),
+        ("binary.dat", Some("100644"), Some("100644"), false),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    let header_modes = support::patch_modes(&files["changes.patch"]);
+    for (path, before_mode, after_mode, has_blob) in expected {
+        let entry = entries.iter().find(|entry| entry["path"] == path).unwrap();
+        let modes = (mode(&entry["before_mode"]), mode(&entry["after_mode"]));
+        assert_eq!(
+            modes,
+            (
+                before_mode.map(str::to_owned),
+                after_mode.map(str::to_owned)
+            ),
+            "{path}"
+        );
+        assert_eq!(
+            header_modes[path], modes,
+            "{path} modes must match the patch"
+        );
+        assert_eq!(!entry["after_blob"].is_null(), has_blob, "{path}");
+    }
+
+    let rebuilt = support::rebuild_before(&files, &result);
+    let mut rebuilt_paths: Vec<_> = rebuilt.keys().cloned().collect();
+    rebuilt_paths.sort();
+    assert_eq!(
+        rebuilt_paths,
+        [
+            "created.sh",
+            "deleted.txt",
+            "mode-only.sh",
+            "modified.txt",
+            "nested/created.txt",
+            "removed-link",
+            "star*.txt",
+        ]
+    );
+    for (path, before) in rebuilt {
+        let entry = entries.iter().find(|entry| entry["path"] == path).unwrap();
+        match before {
+            None => assert!(
+                entry["before_sha256"].is_null(),
+                "{path} must not exist before"
+            ),
+            Some((before_mode, bytes)) => {
+                assert_eq!(
+                    entry["before_sha256"],
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    "{path}"
+                );
+                if !entry["after_mode"].is_null() {
+                    assert_eq!(entry["before_mode"], before_mode, "{path}");
+                }
+            }
+        }
+    }
 }

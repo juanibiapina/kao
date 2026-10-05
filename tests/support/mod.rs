@@ -40,6 +40,119 @@ pub fn read_capture(
     .unwrap();
     (files, result)
 }
+pub type Rebuilt = std::collections::BTreeMap<String, Option<(String, Vec<u8>)>>;
+
+pub fn rebuild_before(
+    files: &std::collections::BTreeMap<String, Vec<u8>>,
+    result: &serde_json::Value,
+) -> Rebuilt {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let tree = scratch.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    run(
+        scratch.path(),
+        Command::new("git").current_dir(&tree).args(["init", "-q"]),
+    );
+    let patch = scratch.path().join("changes.patch");
+    fs::write(&patch, &files["changes.patch"]).unwrap();
+    let entries = result["files"].as_array().unwrap();
+    for entry in entries {
+        if let Some(blob) = entry["after_blob"].as_str() {
+            let path = tree.join(entry["path"].as_str().unwrap());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &files[blob]).unwrap();
+            let mode = if entry["after_mode"] == "100755" {
+                0o755
+            } else {
+                0o644
+            };
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+    }
+    let mut rebuilt = Rebuilt::new();
+    for entry in entries {
+        if entry["after_blob"].is_null() && !entry["after_sha256"].is_null() {
+            continue;
+        }
+        let path = entry["path"].as_str().unwrap();
+        let escaped: String = path
+            .chars()
+            .flat_map(|character| {
+                let escape = "*?[\\".contains(character).then_some('\\');
+                escape.into_iter().chain([character])
+            })
+            .collect();
+        let (_, _, errors) = run(
+            scratch.path(),
+            Command::new("git")
+                .current_dir(&tree)
+                .args(["apply", "-R", "--binary", "--whitespace=nowarn"])
+                .arg(format!("--include={escaped}"))
+                .arg(&patch),
+        );
+        assert_eq!(errors, "", "reverse patch for {path} must apply cleanly");
+        let file = tree.join(path);
+        let before = match fs::symlink_metadata(&file) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("read rebuilt {path}: {error}"),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                use std::os::unix::ffi::OsStrExt;
+                let target = fs::read_link(&file).unwrap();
+                Some(("120000".to_owned(), target.as_os_str().as_bytes().to_vec()))
+            }
+            Ok(metadata) => {
+                let mode = if metadata.permissions().mode() & 0o111 != 0 {
+                    "100755"
+                } else {
+                    "100644"
+                };
+                Some((mode.to_owned(), fs::read(&file).unwrap()))
+            }
+        };
+        rebuilt.insert(path.to_owned(), before);
+    }
+    rebuilt
+}
+
+pub fn patch_modes(
+    patch: &[u8],
+) -> std::collections::BTreeMap<String, (Option<String>, Option<String>)> {
+    let mut modes = std::collections::BTreeMap::new();
+    let mut current: Option<String> = None;
+    for line in String::from_utf8_lossy(patch).lines() {
+        if let Some(paths) = line.strip_prefix("diff --git a/") {
+            let path = paths.split(" b/").next().unwrap().to_owned();
+            modes.entry(path.clone()).or_insert((None, None));
+            current = Some(path);
+            continue;
+        }
+        let Some(path) = &current else { continue };
+        if ["---", "@@", "GIT binary patch", "Binary files"]
+            .iter()
+            .any(|marker| line.starts_with(marker))
+        {
+            current = None;
+            continue;
+        }
+        let (before, after): &mut (Option<String>, Option<String>) = modes.get_mut(path).unwrap();
+        let words: Vec<_> = line.split(' ').collect();
+        match words[..] {
+            ["old", "mode", mode] | ["deleted", "file", "mode", mode] => {
+                *before = Some(mode.to_owned())
+            }
+            ["new", "mode", mode] | ["new", "file", "mode", mode] => *after = Some(mode.to_owned()),
+            ["index", _, mode] => {
+                *before = Some(mode.to_owned());
+                *after = Some(mode.to_owned());
+            }
+            _ => {}
+        }
+    }
+    modes
+}
+
 pub fn retained_artifacts(stderr: &str) -> std::path::PathBuf {
     let location = stderr
         .split("artifacts retained at ")
@@ -507,23 +620,6 @@ impl Repository {
     pub fn config(&self, key: &str, value: &str) {
         self.git(&["config", key, value]);
     }
-    pub fn reconstruct_before(&self, patch: &[u8], path: &str, after: &[u8]) -> Vec<u8> {
-        let scratch = tempfile::tempdir_in(&self.root).unwrap();
-        let file = scratch.path().join("tree").join(path);
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(&file, after).unwrap();
-        let patch_path = scratch.path().join("changes.patch");
-        fs::write(&patch_path, patch).unwrap();
-        run(
-            scratch.path(),
-            Command::new("git")
-                .current_dir(scratch.path().join("tree"))
-                .args(["apply", "--reverse", "--include", path])
-                .arg(&patch_path),
-        );
-        fs::read(file).unwrap()
-    }
-
     pub fn status(&self) -> String {
         self.git(&["status", "--porcelain"])
     }

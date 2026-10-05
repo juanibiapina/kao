@@ -18,8 +18,12 @@ kao run -- bash -c 'cargo fmt' 3>/tmp/capture.tar
 The command runs in the current directory with unchanged stdin, stdout, and stderr. File descriptor 3 receives a tar archive containing:
 
 - `changes.patch`: a Git binary patch from the files before the command to the files after it.
-- `blobs/<sha256>`: after contents of modified text files.
-- `result.json`: the manifest, written last. It lists each changed path with before and after SHA-256 hashes, plus the command outcome and whether the capture is complete.
+- `blobs/<sha256>`: after contents of modified and created text files.
+- `result.json`: the manifest, written last. It records the command outcome, whether the capture is complete, and an entry for each changed path.
+
+Each manifest entry has `path`, `before_mode` and `after_mode` (Git's octal mode string, such as `100644`, `100755`, or `120000`), `before_sha256` and `after_sha256`, and `after_blob`. A missing side has `null` mode and hash. `after_blob` names the blob for text files and is `null` for deleted files, symlinks, and binary files, whose contents are in the patch.
+
+The archive alone rebuilds every text file's before contents: write each after blob at its path with its `after_mode`, then run `git apply -R --binary --include=<path> changes.patch` for each path that has an after blob or was deleted. `--include` takes a pattern, so escape `*`, `?`, `[`, and `\` in paths. Some Git versions recreate a deleted file as a regular, non-executable file; take its mode from `before_mode`.
 
 A caller reading descriptor 3 through a pipe must drain it while Kao runs. Kao closes descriptor 3 in the command it runs.
 

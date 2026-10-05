@@ -77,8 +77,7 @@ fn describe(workspace: &Workspace, changes: Vec<Change>, patch: Vec<u8>) -> Resu
         }
         let before_hash = change.before.as_ref().map(|entry| hash(&entry.bytes));
         let after_hash = change.after.as_ref().map(|entry| hash(&entry.bytes));
-        let blob = if change.before.is_some()
-            && is_regular(change.after.as_ref())
+        let blob = if is_regular(change.after.as_ref())
             && let Some(after) = &change.after
             && !after.bytes.iter().take(8000).any(|byte| *byte == 0)
         {
@@ -88,8 +87,13 @@ fn describe(workspace: &Workspace, changes: Vec<Change>, patch: Vec<u8>) -> Resu
         } else {
             None
         };
+        let mode = |entry: &Option<crate::snapshot::Entry>| {
+            entry.as_ref().map(|entry| format!("{:06o}", entry.mode))
+        };
         files.push(json!({
             "path": change.path,
+            "before_mode": mode(&change.before),
+            "after_mode": mode(&change.after),
             "before_sha256": before_hash,
             "after_sha256": after_hash,
             "after_blob": blob,
