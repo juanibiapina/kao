@@ -665,7 +665,14 @@ fn cleans_up_snapshots_without_following_ignored_symlinks() {
     assert_eq!(
         directories(),
         before,
-        "successful captures must remove their snapshots before returning"
+        "captures must not write next to the repository"
+    );
+    assert_eq!(
+        fs::read_dir(root.join(".git/kao/operations"))
+            .unwrap()
+            .count(),
+        0,
+        "successful captures must remove their operation artifacts"
     );
     assert_eq!(fs::read(protected.join("outside.txt")).unwrap(), b"keep\n");
     assert!(
@@ -809,6 +816,68 @@ fn each_capture_starts_from_the_current_files() {
         );
         expected_before = after;
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn captures_symlink_changes_without_touching_their_targets() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    let repo = Repository::new("duck pond");
+    let root = repo.canonical_path();
+    let outside = root.parent().unwrap().join("outside.txt");
+    fs::write(&outside, b"outside\n").unwrap();
+    repo.write("duck.txt", "quack\n");
+    symlink("duck.txt", root.join("retargeted")).unwrap();
+    symlink("duck.txt", root.join("removed")).unwrap();
+    repo.commit("Add links");
+
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run",
+        "--",
+        "bash",
+        "-c",
+        "ln -sfn ../outside.txt retargeted; rm removed; ln -s duck.txt created",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let changes = result["files"].as_array().unwrap();
+    assert_eq!(changes.len(), 3);
+    for (path, before, after) in [
+        ("retargeted", Some("duck.txt"), Some("../outside.txt")),
+        ("removed", Some("duck.txt"), None),
+        ("created", None, Some("duck.txt")),
+    ] {
+        let change = changes
+            .iter()
+            .find(|change| change["path"] == path)
+            .unwrap();
+        let digest = |target: Option<&str>| {
+            target
+                .map(|target| serde_json::json!(format!("{:x}", Sha256::digest(target.as_bytes()))))
+                .unwrap_or(serde_json::Value::Null)
+        };
+        assert_eq!(change["before_sha256"], digest(before), "{path}");
+        assert_eq!(change["after_sha256"], digest(after), "{path}");
+        assert!(
+            change["after_blob"].is_null(),
+            "symlinks never have after blobs"
+        );
+    }
+    assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+    repo.reverse_patch(&files["changes.patch"]);
+    assert_eq!(
+        fs::read_link(root.join("retargeted")).unwrap(),
+        std::path::Path::new("duck.txt")
+    );
+    assert_eq!(
+        fs::read_link(root.join("removed")).unwrap(),
+        std::path::Path::new("duck.txt")
+    );
+    assert!(fs::symlink_metadata(root.join("created")).is_err());
+    assert_eq!(repo.status(), "");
 }
 
 #[test]
