@@ -1072,3 +1072,92 @@ fn requires_a_git_version_with_attribute_source_support() {
     );
     assert_eq!(repo.read("duck.txt"), "quack\n");
 }
+
+fn cancelled_capture(
+    repo: &Repository,
+    script: &str,
+    signal: i32,
+) -> (std::process::ExitStatus, i32, serde_json::Value, Vec<u8>) {
+    let mut running = repo.spawn_capture("cancelled", &["run", "--", "bash", "-c", script]);
+    running.wait_for_output("ready\n");
+    running.signal(signal);
+    let (status, stdout, _, capture) = running.finish();
+    let group = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("group "))
+        .expect("the command must print its process group")
+        .parse()
+        .unwrap();
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    assert!(result["command"]["exit_code"].is_null());
+    let change = &result["files"][0];
+    assert_eq!(change["path"], "duck.txt");
+    assert_eq!(files[change["after_blob"].as_str().unwrap()], b"honk\n");
+    assert!(
+        repo.operation_dirs().is_empty(),
+        "a cancelled capture must not leave an operation directory"
+    );
+    assert!(
+        !support::process_group_exists(group),
+        "every process in the command's group must have exited"
+    );
+    (status, group, result, files["changes.patch"].clone())
+}
+
+#[test]
+fn delivers_a_capture_when_kao_is_signalled() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let repo = Repository::new("duck pond");
+        repo.write("duck.txt", "quack\n");
+        repo.commit("Add duck");
+        let (status, _, result, _) = cancelled_capture(
+            &repo,
+            "printf 'honk\\n' > duck.txt; printf 'group %s\\n' \"$$\"; printf 'ready\\n'; sleep 30",
+            signal,
+        );
+        assert_eq!(status.code(), Some(128 + signal), "signal {signal}");
+        assert_eq!(result["command"]["signal"], signal);
+        assert_eq!(repo.read("duck.txt"), "honk\n");
+    }
+}
+
+#[test]
+fn escalates_to_sigkill_when_the_command_ignores_the_signal() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let started = std::time::Instant::now();
+    let (status, _, result, _) = cancelled_capture(
+        &repo,
+        "trap '' TERM; printf 'honk\\n' > duck.txt; printf 'group %s\\n' \"$$\"; printf 'ready\\n'; sleep 30",
+        libc::SIGTERM,
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(3),
+        "Kao must wait the grace period before SIGKILL"
+    );
+    assert_eq!(status.code(), Some(128 + libc::SIGKILL));
+    assert_eq!(result["command"]["signal"], libc::SIGKILL);
+}
+
+#[test]
+fn hands_the_terminal_to_the_command() {
+    let repo = Repository::new("duck pond");
+    repo.write("duck.txt", "quack\n");
+    repo.commit("Add duck");
+    let (status, capture) = repo.capture_in_terminal(
+        &[
+            "run",
+            "--",
+            "bash",
+            "-c",
+            "IFS= read -r line; printf '%s\\n' \"$line\" > got.txt",
+        ],
+        b"duck\n",
+    );
+    assert!(status.success(), "the command must read the terminal");
+    assert_eq!(repo.read("got.txt"), "duck\n");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["files"][0]["path"], "got.txt");
+}

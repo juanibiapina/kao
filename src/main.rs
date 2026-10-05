@@ -1,5 +1,6 @@
 mod capture;
 mod snapshot;
+mod supervisor;
 
 const USAGE: &str =
     "usage: kao run -- <command> [args...] 3>capture.tar\n       kao lock -- <command> [args...]";

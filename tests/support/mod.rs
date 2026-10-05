@@ -130,6 +130,10 @@ pub fn read_pipe_chunk(reader: &mut std::io::PipeReader, limit: usize) -> Vec<u8
     bytes.truncate(count);
     bytes
 }
+pub fn process_group_exists(group: i32) -> bool {
+    let alive = unsafe { libc::kill(-group, 0) } == 0;
+    alive || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
 pub struct RunningCapture {
     child: std::process::Child,
     logs: std::path::PathBuf,
@@ -174,6 +178,10 @@ impl RunningCapture {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    pub fn signal(&self, signal: i32) {
+        assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
 
     pub fn release(&mut self) {
@@ -348,6 +356,60 @@ impl Repository {
         let (status, stdout, stderr) = execute(&self.root, &mut command);
         (status, stdout, stderr, fs::read(capture).unwrap())
     }
+    pub fn capture_in_terminal(&self, args: &[&str], input: &[u8]) -> (ExitStatus, Vec<u8>) {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::CommandExt;
+
+        let (mut controller, mut terminal) = (0, 0);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut controller,
+                    &mut terminal,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "open a pseudo-terminal"
+        );
+        let mut controller = unsafe { File::from_raw_fd(controller) };
+        let capture_path = self.root.join("capture.tar");
+        let capture = File::create(&capture_path).unwrap();
+        let capture_descriptor = capture.as_raw_fd();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kao"));
+        command.current_dir(&self.path).args(args);
+        configure(&self.root, &mut command);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(terminal, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for target in 0..3 {
+                    if libc::dup2(terminal, target) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                if libc::dup2(capture_descriptor, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().expect("spawn Kao in a terminal");
+        unsafe { libc::close(terminal) };
+        drop(capture);
+        let mut output = controller.try_clone().unwrap();
+        thread::spawn(move || {
+            let mut bytes = [0; 4096];
+            while matches!(output.read(&mut bytes), Ok(1..)) {}
+        });
+        controller.write_all(input).unwrap();
+        let (status, _, _) = finish(&self.root, &mut child, "Kao in a terminal");
+        (status, fs::read(capture_path).unwrap())
+    }
     pub fn spawn_capture(&self, name: &str, args: &[&str]) -> RunningCapture {
         use std::os::unix::process::CommandExt;
         let logs = self.root.join(name);
@@ -365,6 +427,14 @@ impl Repository {
             .args(args)
             .stdin(Stdio::piped())
             .process_group(0);
+        unsafe {
+            command.pre_exec(|| {
+                for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
         configure(&logs, &mut command);
         let child = command.spawn().expect("spawn concurrent Kao invocation");
         RunningCapture { child, logs }
@@ -407,6 +477,13 @@ impl Repository {
         let path = self.root.join(name);
         self.git(&["worktree", "add", "--detach", path.to_str().unwrap()]);
         path.canonicalize().unwrap()
+    }
+    pub fn operation_dirs(&self) -> Vec<std::path::PathBuf> {
+        match fs::read_dir(self.path.join(".git/kao/operations")) {
+            Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read operations: {error}"),
+        }
     }
     pub fn canonical_path(&self) -> std::path::PathBuf {
         self.path.canonicalize().unwrap()

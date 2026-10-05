@@ -27,6 +27,14 @@ Captured files are tracked files plus untracked files that `.gitignore` does not
 
 Kao exits with 125 when it cannot capture, when it cannot write the archive, or when it is invoked incorrectly. It reports the reason on stderr. When Kao has already run the command, it keeps the operation's files and prints their location.
 
+### Cancel a command
+
+Kao runs the command in its own process group. To cancel it, send SIGINT, SIGTERM, or SIGHUP to Kao's process ID only, never to the process group. Kao forwards the signal to the command's process group. If the group has not exited after 3 seconds, Kao sends it SIGKILL. Kao then captures the changes and writes the archive as usual; `command.signal` in the manifest reports the signal that ended the command.
+
+After signalling Kao, wait for it to exit. Killing Kao with SIGKILL loses the capture: the changes stay on disk and the next capture includes them in its before contents. A signal that arrives while Kao waits for the lock ends Kao before the command runs. A signal that was ignored when Kao started, such as SIGHUP under `nohup`, stays ignored by Kao and the command.
+
+When Kao is the foreground job of a terminal, it gives the terminal to the command while it runs, so the command can read it and Ctrl-C reaches the command.
+
 ### Run a command under the lock without capture
 
 ```sh

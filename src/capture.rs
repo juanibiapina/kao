@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::snapshot::{Change, Result, Workspace};
+use crate::supervisor::Supervisor;
 
 const REGULAR_FILE: u32 = 0o100000;
 
@@ -133,6 +134,7 @@ pub fn run(command: &[OsString]) -> Result<i32> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let workspace = Workspace::discover(&cwd)?;
     let _lock = lock_repository(&workspace.common_dir)?;
+    let supervisor = Supervisor::install()?;
     workspace.bound_store()?;
     let operations = workspace.common_dir.join("kao").join("operations");
     fs::create_dir_all(&operations)?;
@@ -147,10 +149,12 @@ pub fn run(command: &[OsString]) -> Result<i32> {
         .into_owned();
     let before = workspace.snapshot()?;
     fs::write(artifacts.path().join("before-tree"), &before.0)?;
-    let command = Command::new(&command[0])
-        .args(&command[1..])
-        .current_dir(&cwd)
-        .status();
+    if let Some(signal) = supervisor.pending() {
+        return Err(format!("cancelled by signal {signal} before the command started").into());
+    }
+    let mut child = Command::new(&command[0]);
+    child.args(&command[1..]).current_dir(&cwd);
+    let command = supervisor.run(child);
     let command_result = match &command {
         Ok(status) => json!({"exit_code": status.code(), "signal": status.signal()}),
         Err(error) => json!({"exit_code": null, "signal": null, "error": error.to_string()}),
