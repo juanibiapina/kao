@@ -15,7 +15,7 @@ From a Git working tree:
 kao run -- bash -c 'cargo fmt' 3>/tmp/capture.tar
 ```
 
-The command runs in the current directory with unchanged stdin, stdout, and stderr. Kao preserves its exit code. File descriptor 3 receives a tar archive containing:
+The command runs in the current directory with unchanged stdin, stdout, and stderr. File descriptor 3 receives a tar archive containing:
 
 - `changes.patch`: a Git binary patch from the files before the command to the files after it.
 - `blobs/<sha256>`: after contents of modified text files.
@@ -25,7 +25,12 @@ A caller reading descriptor 3 through a pipe must drain it while Kao runs. Kao c
 
 Captured files are tracked files plus untracked files that `.gitignore` does not exclude. Kao records exact bytes: it ignores line-ending conversion and filters from `.gitattributes` and Git settings. Regular files, executable bits, and symlinks are supported. Changes involving submodules or embedded repositories make the capture incomplete.
 
-Kao exits with 125 when it cannot capture, when it cannot write the archive, or when it is invoked incorrectly. It reports the reason on stderr. When Kao has already run the command, it keeps the operation's files and prints their location.
+Once Kao has written a complete archive on descriptor 3, it exits with the command's exit code, or 128 plus the signal number if a signal ended the command. This holds even when the capture is incomplete: `capture.complete` and `capture.error` in the manifest report the problem, and stderr names the operation's files, which Kao keeps.
+
+Kao exits with 125 in two cases, and reports the reason on stderr:
+
+- Kao never ran the command, for example when it is invoked incorrectly, outside a Git working tree, or the command cannot start.
+- Kao ran the command but could not deliver the archive on descriptor 3. Stderr reports `capture output failed` and where the operation's files are kept.
 
 ### Cancel a command
 

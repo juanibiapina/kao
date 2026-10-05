@@ -198,16 +198,21 @@ pub fn run(command: &[OsString]) -> Result<i32> {
         )
         .into());
     }
-    if !complete {
+    if let Some(error) = error {
         let retained = artifacts.keep();
-        return Err(format!(
-            "capture failed: {}; artifacts retained at {}",
-            error.as_deref().unwrap_or("unknown error"),
+        eprintln!(
+            "kao: capture failed: {error}; artifacts retained at {}",
             retained.display()
-        )
-        .into());
+        );
+    } else {
+        let location = artifacts.path().to_path_buf();
+        if let Err(error) = artifacts.close() {
+            eprintln!(
+                "kao: could not remove operation files: {error}; artifacts retained at {}",
+                location.display()
+            );
+        }
     }
-    artifacts.close()?;
     let status: ExitStatus =
         command.map_err(|error| format!("command could not start: {error}"))?;
     Ok(exit_code(status))

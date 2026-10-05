@@ -470,14 +470,16 @@ fn reports_capture_failure_and_retains_available_artifacts() {
         "--",
         "bash",
         "-c",
-        "printf 'after\\n' > a-good.txt; git init -q nested; git -C nested -c user.name=a -c user.email=a@b -c commit.gpgsign=false commit -q --allow-empty -m nested",
+        "printf 'after\\n' > a-good.txt; git init -q nested; git -C nested -c user.name=a -c user.email=a@b -c commit.gpgsign=false commit -q --allow-empty -m nested; exit 3",
     ]);
-    assert_eq!(status.code(), Some(125));
-    let (_, result) = support::read_capture(&capture);
     assert_eq!(
-        result["command"]["exit_code"], 0,
-        "the command succeeded even though capture failed"
+        status.code(),
+        Some(3),
+        "a delivered archive means Kao reports the command's exit code"
     );
+    assert!(stderr.contains("capture failed"), "{stderr}");
+    let (_, result) = support::read_capture(&capture);
+    assert_eq!(result["command"]["exit_code"], 3);
     assert_eq!(result["capture"]["complete"], false);
     assert!(
         result["capture"]["error"]
@@ -953,18 +955,23 @@ fn kao_lock_passes_through_input_output_and_exit_code() {
 }
 
 #[test]
-fn kao_lock_requires_a_git_working_tree() {
+fn requires_a_git_working_tree() {
     let repo = Repository::new("duck pond");
     let outside = repo.outside();
-    let (status, stdout, stderr) = repo.kao_in(
-        &outside,
-        &["lock", "--", "bash", "-c", "printf 'ran\\n'; touch ran"],
-        b"",
-    );
+    let command = ["--", "bash", "-c", "printf 'ran\\n'; touch ran"];
+    let (status, stdout, stderr) = repo.kao_in(&outside, &[&["lock"][..], &command].concat(), b"");
     assert_eq!(status.code(), Some(125));
     assert_eq!(stdout, "");
     assert!(stderr.starts_with("kao: "), "{stderr}");
     assert!(!stderr.contains("usage"), "{stderr}");
+    assert!(!outside.join("ran").exists());
+
+    let (status, stdout, stderr, capture) =
+        repo.capture_from(&outside, &[&["run"][..], &command].concat());
+    assert_eq!(status.code(), Some(125), "Kao never ran the command");
+    assert_eq!(stdout, "");
+    assert!(stderr.starts_with("kao: "), "{stderr}");
+    assert!(capture.is_empty(), "no archive without a command");
     assert!(!outside.join("ran").exists());
 }
 
