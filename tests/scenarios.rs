@@ -1,10 +1,6 @@
 mod support;
-
-#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use support::Repository;
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_a_text_edit_without_redirecting_the_command() {
     let repo = Repository::new("duck pond");
@@ -90,8 +86,6 @@ fn captures_a_text_edit_without_redirecting_the_command() {
         "reverse patch must restore the committed tree"
     );
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_changes_when_the_command_fails() {
     let repo = Repository::new("duck pond");
@@ -144,8 +138,6 @@ fn captures_changes_when_the_command_fails() {
     assert_eq!(repo.read("duck.txt"), "quack\n");
     assert_eq!(repo.status(), "");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn concurrent_commands_wait_for_the_repository_lock() {
     let repo = Repository::new("duck pond");
@@ -225,8 +217,6 @@ fn concurrent_commands_wait_for_the_repository_lock() {
     assert_eq!(repo.read("duck.txt"), "quack\n");
     assert_eq!(repo.status(), "");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn preserves_crlf_and_final_newlines_in_text_captures() {
     for (before, after) in [
@@ -271,8 +261,6 @@ fn preserves_crlf_and_final_newlines_in_text_captures() {
         assert_eq!(repo.status(), "");
     }
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_additions_deletions_and_replacements_from_dirty_working_bytes() {
     let repo = Repository::new("duck pond");
@@ -326,8 +314,6 @@ fn captures_additions_deletions_and_replacements_from_dirty_working_bytes() {
     assert!(!repo.canonical_path().join("nested/created.txt").exists());
     assert_eq!(repo.status(), before_status);
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_reversible_binary_and_mode_changes() {
     use std::fs;
@@ -415,8 +401,6 @@ fn captures_reversible_binary_and_mode_changes() {
     );
     assert_eq!(repo.status(), "");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn streams_capture_on_fd_three_and_holds_the_lock_until_output_finishes() {
     let repo = Repository::new("duck pond");
@@ -473,8 +457,6 @@ fn streams_capture_on_fd_three_and_holds_the_lock_until_output_finishes() {
     );
     assert_eq!(repo.read("duck.txt"), format!("{after}second\n"));
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn reports_capture_failure_and_retains_available_artifacts() {
     use std::fs;
@@ -512,8 +494,6 @@ fn reports_capture_failure_and_retains_available_artifacts() {
     let (_, result) = support::read_capture(&capture);
     assert_eq!(result["capture"]["complete"], true);
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
     use std::fs;
@@ -560,8 +540,6 @@ fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
         format!("{:x}", Sha256::digest(b"honk\n"))
     );
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn rejects_unwritable_fd_three_before_executing_the_command() {
     let repo = Repository::new("duck pond");
@@ -588,8 +566,6 @@ fn rejects_unwritable_fd_three_before_executing_the_command() {
         assert_eq!(repo.status(), "");
     }
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn reports_empty_net_changes_without_resetting_dirty_files() {
     let repo = Repository::new("duck pond");
@@ -629,8 +605,6 @@ fn reports_empty_net_changes_without_resetting_dirty_files() {
     }
     assert_eq!(repo.read("cache.txt"), "updated cache\n");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn cleans_up_snapshots_without_following_ignored_symlinks() {
     use std::fs;
@@ -683,8 +657,6 @@ fn cleans_up_snapshots_without_following_ignored_symlinks() {
     );
     assert_eq!(repo.status(), "");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn preserves_nested_cwd_and_discovers_linked_working_trees() {
     use std::fs;
@@ -728,8 +700,6 @@ fn preserves_nested_cwd_and_discovers_linked_working_trees() {
         assert_eq!(fs::read(cwd.join("duck.txt")).unwrap(), b"honk\n");
     }
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
     let repo = Repository::new("duck pond");
@@ -776,8 +746,6 @@ fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
         );
     }
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn each_capture_starts_from_the_current_files() {
     let repo = Repository::new("duck pond");
@@ -817,8 +785,6 @@ fn each_capture_starts_from_the_current_files() {
         expected_before = after;
     }
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn captures_symlink_changes_without_touching_their_targets() {
     use std::fs;
@@ -867,17 +833,16 @@ fn captures_symlink_changes_without_touching_their_targets() {
         );
     }
     assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
-    repo.reverse_patch(&files["changes.patch"]);
+    let patch = std::str::from_utf8(&files["changes.patch"]).unwrap();
+    assert!(patch.contains("diff --git a/removed b/removed\ndeleted file mode 120000\n"));
+    assert!(patch.contains("diff --git a/created b/created\nnew file mode 120000\n"));
+    repo.reverse_patch_excluding(&files["changes.patch"], &["removed"]);
     assert_eq!(
         fs::read_link(root.join("retargeted")).unwrap(),
         std::path::Path::new("duck.txt")
     );
-    assert_eq!(
-        fs::read_link(root.join("removed")).unwrap(),
-        std::path::Path::new("duck.txt")
-    );
     assert!(fs::symlink_metadata(root.join("created")).is_err());
-    assert_eq!(repo.status(), "");
+    assert_eq!(repo.status(), " D removed\n");
 }
 
 #[test]
@@ -899,8 +864,6 @@ fn rejects_malformed_invocations_with_usage() {
     }
     assert_eq!(repo.status(), "");
 }
-
-#[cfg(target_os = "macos")]
 #[test]
 fn requires_a_git_version_with_attribute_source_support() {
     let repo = Repository::new("duck pond");

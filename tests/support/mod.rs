@@ -3,8 +3,6 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-
-#[cfg(target_os = "macos")]
 pub fn read_capture(
     capture: &[u8],
 ) -> (
@@ -42,8 +40,6 @@ pub fn read_capture(
     .unwrap();
     (files, result)
 }
-
-#[cfg(target_os = "macos")]
 pub fn retained_artifacts(stderr: &str) -> std::path::PathBuf {
     let location = stderr
         .split("artifacts retained at ")
@@ -116,8 +112,6 @@ fn finish(
     eprintln!("{description}\nstatus: {status}\nstdout: {output}\nstderr: {errors}");
     (status, output, errors)
 }
-
-#[cfg(target_os = "macos")]
 pub fn read_pipe_chunk(reader: &mut std::io::PipeReader, limit: usize) -> Vec<u8> {
     use std::io::Read;
     use std::os::fd::AsRawFd;
@@ -136,14 +130,10 @@ pub fn read_pipe_chunk(reader: &mut std::io::PipeReader, limit: usize) -> Vec<u8
     bytes.truncate(count);
     bytes
 }
-
-#[cfg(target_os = "macos")]
 pub struct RunningCapture {
     child: std::process::Child,
     logs: std::path::PathBuf,
 }
-
-#[cfg(target_os = "macos")]
 impl RunningCapture {
     pub fn wait_for_output(&mut self, signal: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -208,8 +198,6 @@ impl RunningCapture {
         (status, stdout, stderr, capture)
     }
 }
-
-#[cfg(target_os = "macos")]
 impl Drop for RunningCapture {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -273,8 +261,6 @@ impl Repository {
         }
         execute(&self.root, &mut command)
     }
-
-    #[cfg(target_os = "macos")]
     pub fn fake_git(&self, version: &str) -> std::path::PathBuf {
         let directory = self.root.join("fake-git");
         fs::create_dir_all(&directory).unwrap();
@@ -299,8 +285,6 @@ impl Repository {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         directory
     }
-
-    #[cfg(target_os = "macos")]
     pub fn capture_with_unwritable_descriptor(
         &self,
         readonly: bool,
@@ -321,13 +305,9 @@ impl Repository {
                 .args(args),
         )
     }
-
-    #[cfg(target_os = "macos")]
     pub fn capture(&self, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
         self.capture_from(&self.path, args)
     }
-
-    #[cfg(target_os = "macos")]
     pub fn capture_from(&self, cwd: &Path, args: &[&str]) -> (ExitStatus, String, String, Vec<u8>) {
         let capture = self.root.join("capture.tar");
         let (status, stdout, stderr) = execute(
@@ -341,8 +321,6 @@ impl Repository {
         );
         (status, stdout, stderr, fs::read(capture).unwrap())
     }
-
-    #[cfg(target_os = "macos")]
     pub fn spawn_capture(&self, name: &str, args: &[&str]) -> RunningCapture {
         use std::os::unix::process::CommandExt;
         let logs = self.root.join(name);
@@ -364,8 +342,6 @@ impl Repository {
         let child = command.spawn().expect("spawn concurrent Kao invocation");
         RunningCapture { child, logs }
     }
-
-    #[cfg(target_os = "macos")]
     pub fn spawn_pipe_capture(
         &self,
         name: &str,
@@ -400,21 +376,19 @@ impl Repository {
         drop(writer);
         (RunningCapture { child, logs }, reader)
     }
-
-    #[cfg(target_os = "macos")]
     pub fn add_worktree(&self, name: &str) -> std::path::PathBuf {
         let path = self.root.join(name);
         self.git(&["worktree", "add", "--detach", path.to_str().unwrap()]);
         path.canonicalize().unwrap()
     }
-
-    #[cfg(target_os = "macos")]
     pub fn canonical_path(&self) -> std::path::PathBuf {
         self.path.canonicalize().unwrap()
     }
-
-    #[cfg(target_os = "macos")]
     pub fn reverse_patch(&self, patch: &[u8]) {
+        self.reverse_patch_excluding(patch, &[]);
+    }
+
+    pub fn reverse_patch_excluding(&self, patch: &[u8], excluded: &[&str]) {
         let patch_path = self.root.join("changes.patch");
         fs::write(&patch_path, patch).unwrap();
         run(
@@ -422,16 +396,13 @@ impl Repository {
             Command::new("git")
                 .current_dir(&self.path)
                 .args(["apply", "--reverse"])
+                .args(excluded.iter().map(|path| format!("--exclude={path}")))
                 .arg(patch_path),
         );
     }
-
-    #[cfg(target_os = "macos")]
     pub fn config(&self, key: &str, value: &str) {
         self.git(&["config", key, value]);
     }
-
-    #[cfg(target_os = "macos")]
     pub fn reconstruct_before(&self, patch: &[u8], path: &str, after: &[u8]) -> Vec<u8> {
         let scratch = tempfile::tempdir_in(&self.root).unwrap();
         let file = scratch.path().join("tree").join(path);
