@@ -43,6 +43,22 @@ pub fn read_capture(
     (files, result)
 }
 
+#[cfg(target_os = "macos")]
+pub fn retained_artifacts(stderr: &str) -> std::path::PathBuf {
+    let location = stderr
+        .split("artifacts retained at ")
+        .nth(1)
+        .expect("Kao failures must report retained artifacts")
+        .trim();
+    let path = std::path::PathBuf::from(location);
+    assert!(
+        path.is_dir(),
+        "retained artifacts must exist: {}",
+        path.display()
+    );
+    path
+}
+
 fn run(root: &Path, command: &mut Command) -> (ExitStatus, String, String) {
     let result = execute(root, command);
     assert!(result.0.success(), "fixture: {}", root.display());

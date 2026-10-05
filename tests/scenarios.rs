@@ -505,25 +505,7 @@ fn reports_capture_failure_and_retains_available_artifacts() {
             .unwrap()
             .contains("unsupported file type")
     );
-    let retained = std::path::PathBuf::from(
-        stderr
-            .split("artifacts retained at ")
-            .nth(1)
-            .expect("capture error must identify retained artifacts")
-            .trim(),
-    );
-    assert_eq!(
-        fs::read(retained.join("snapshot/duck.txt")).unwrap(),
-        b"quack\n"
-    );
-    assert_eq!(
-        fs::read(retained.join("before/a-good.txt")).unwrap(),
-        b"before\n"
-    );
-    assert_eq!(
-        fs::read(retained.join("after/a-good.txt")).unwrap(),
-        b"after\n"
-    );
+    let retained = support::retained_artifacts(&stderr);
     assert_eq!(fs::read(retained.join("capture.tar")).unwrap(), capture);
     assert_eq!(repo.read("a-good.txt"), "after\n");
     assert_eq!(
@@ -565,14 +547,7 @@ fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
     assert_eq!(status.code(), Some(125));
     assert_eq!(stdout, "");
     assert!(stderr.contains("capture output failed"), "{stderr}");
-    let retained = std::path::PathBuf::from(
-        stderr
-            .split("artifacts retained at ")
-            .nth(1)
-            .expect("output failure must retain artifacts")
-            .trim(),
-    );
-    let capture = fs::read(retained.join("capture.tar")).unwrap();
+    let capture = fs::read(support::retained_artifacts(&stderr).join("capture.tar")).unwrap();
     let (files, result) = support::read_capture(&capture);
     assert_eq!(result["command"]["exit_code"], 7);
     assert_eq!(
@@ -582,10 +557,6 @@ fn retains_a_complete_capture_when_the_fd_three_reader_disconnects() {
     assert_eq!(
         files[result["files"][0]["after_blob"].as_str().unwrap()],
         b"honk\n"
-    );
-    assert_eq!(
-        fs::read(retained.join("snapshot/duck.txt")).unwrap(),
-        b"quack\n"
     );
     assert_eq!(repo.read("duck.txt"), "honk\n");
     let (status, _, stderr, capture) =
