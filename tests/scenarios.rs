@@ -761,6 +761,54 @@ fn preserves_nested_cwd_and_discovers_linked_working_trees() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn captures_raw_bytes_despite_line_ending_conversion_and_filters() {
+    let repo = Repository::new("duck pond");
+    repo.config("core.autocrlf", "true");
+    repo.config("filter.upper.clean", "tr a-z A-Z");
+    repo.write(".gitattributes", "*.txt text eol=lf\n*.up filter=upper\n");
+    repo.write("duck.txt", "quack\r\nquack\r\n");
+    repo.write("duck.up", "lower\n");
+    repo.commit("Add converted files");
+
+    let (status, _, stderr, capture) = repo.capture(&[
+        "run",
+        "--",
+        "bash",
+        "-c",
+        "printf 'honk\\r\\nquack\\r\\n' > duck.txt; printf 'still lower\\n' > duck.up",
+    ]);
+    assert!(status.success(), "{stderr}");
+    let (files, result) = support::read_capture(&capture);
+    assert_eq!(result["capture"]["complete"], true);
+    let changes = result["files"].as_array().unwrap();
+    assert_eq!(changes.len(), 2);
+    for (path, before, after) in [
+        ("duck.txt", "quack\r\nquack\r\n", "honk\r\nquack\r\n"),
+        ("duck.up", "lower\n", "still lower\n"),
+    ] {
+        let change = changes
+            .iter()
+            .find(|change| change["path"] == path)
+            .unwrap();
+        assert_eq!(
+            change["before_sha256"],
+            format!("{:x}", Sha256::digest(before.as_bytes()))
+        );
+        assert_eq!(
+            change["after_sha256"],
+            format!("{:x}", Sha256::digest(after.as_bytes()))
+        );
+        let blob = &files[change["after_blob"].as_str().unwrap()];
+        assert_eq!(blob, after.as_bytes());
+        assert_eq!(
+            repo.reconstruct_before(&files["changes.patch"], path, blob),
+            before.as_bytes()
+        );
+    }
+}
+
 #[test]
 fn kao_says_hello_to_a_duck() {
     let repo = Repository::new("duck pond");

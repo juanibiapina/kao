@@ -394,6 +394,29 @@ impl Repository {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn config(&self, key: &str, value: &str) {
+        self.git(&["config", key, value]);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn reconstruct_before(&self, patch: &[u8], path: &str, after: &[u8]) -> Vec<u8> {
+        let scratch = tempfile::tempdir_in(&self.root).unwrap();
+        let file = scratch.path().join("tree").join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, after).unwrap();
+        let patch_path = scratch.path().join("changes.patch");
+        fs::write(&patch_path, patch).unwrap();
+        run(
+            scratch.path(),
+            Command::new("git")
+                .current_dir(scratch.path().join("tree"))
+                .args(["apply", "--reverse", "--include", path])
+                .arg(&patch_path),
+        );
+        fs::read(file).unwrap()
+    }
+
     pub fn status(&self) -> String {
         self.git(&["status", "--porcelain"])
     }
