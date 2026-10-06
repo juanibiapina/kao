@@ -1,13 +1,24 @@
 # Kao
 
-Kao (pronounced cow) is a command runner for agents. It runs a command in a Git working tree and reports the file changes that command made, as a Git patch.
+Kao (pronounced cow) tracks which files each command changes. It is made for agents that run commands in a Git repository.
 
-> [!WARNING]
-> Kao requires a Unix system (macOS or Linux) and Git 2.41 or newer.
+Kao runs your command as usual, but it also returns data about every file that the command changed: which files, what they contained before, and what they contain after.
 
-## Usage
+- The command runs as if you started it directly. It keeps its input, output, and terminal.
+- Commands run sequentially and never interfere with each other.
+- Kao adds about 60–80 ms to a command in a repository with 1,000 files, and about 130–170 ms with 20,000 files. See [BENCHMARKS.md](BENCHMARKS.md).
 
-### Capture a command's changes
+## Install
+
+Kao requires macOS or Linux, Git 2.41 or newer, and Rust installed with rustup.
+
+```sh
+git clone https://github.com/juanibiapina/kao
+cd kao
+cargo install --locked --path .
+```
+
+## Run a command
 
 From a Git working tree:
 
@@ -15,70 +26,64 @@ From a Git working tree:
 kao run -- bash -c 'cargo fmt' 3>/tmp/capture.tar
 ```
 
-The command runs in the current directory with unchanged stdin, stdout, and stderr. File descriptor 3 receives a tar archive containing:
+Kao writes a tar archive to file descriptor 3. Descriptor 3 must be open for writing, and the command does not inherit it. If you read it through a pipe, drain the pipe while Kao runs.
 
-- `changes.patch`: a Git binary patch from the files before the command to the files after it.
-- `blobs/<sha256>`: after contents of modified and created text files.
-- `result.json`: the manifest, written last. It records the command outcome, whether the capture is complete, and an entry for each changed path.
+## The archive
 
-Each manifest entry has `path`, `before_mode` and `after_mode` (Git's octal mode string, such as `100644`, `100755`, or `120000`), `before_sha256` and `after_sha256`, and `after_blob`. A missing side has `null` mode and hash. `after_blob` names the blob for text files and is `null` for deleted files, symlinks, and binary files, whose contents are in the patch.
+Kao captures tracked files and untracked files that `.gitignore` does not exclude, as exact bytes. Line-ending conversion and Git filters do not apply. It supports regular files, executable bits, and symlinks. A change to a submodule, an embedded repository, or a path that is not UTF-8 makes the capture incomplete.
 
-The archive alone rebuilds every text file's before contents: write each after blob at its path with its `after_mode`, then run `git apply -R --binary --include=<path> changes.patch` for each path that has an after blob or was deleted. `--include` takes a pattern, so escape `*`, `?`, `[`, and `\` in paths. Some Git versions recreate a deleted file as a regular, non-executable file; take its mode from `before_mode`.
+- `changes.patch`: a Git binary patch of all changes.
+- `blobs/<sha256>`: the new contents of each changed text file. A text file is a regular file with no NUL byte in its first 8000 bytes.
+- `result.json`: the manifest, written last.
 
-A caller reading descriptor 3 through a pipe must drain it while Kao runs. Kao closes descriptor 3 in the command it runs.
+| Manifest field | Meaning |
+| --- | --- |
+| `format_version` | `1` |
+| `operation_id` | Name of the operation directory in `.git/kao/operations/` |
+| `repository_root`, `cwd` | Absolute paths of the working tree and of the directory where the command ran |
+| `command.exit_code` | Exit code, or `null` if a signal ended the command or it did not start |
+| `command.signal` | Signal that ended the command, or `null` |
+| `command.error` | Why the command did not start. Present only in that case. |
+| `capture.complete`, `capture.error` | Whether Kao captured all changes, and why not. An incomplete capture has no files and an empty patch. |
+| `files[].path` | Path relative to `repository_root` |
+| `files[].before_mode`, `files[].after_mode` | Git mode, such as `100644`, `100755`, or `120000`. `null` where the file does not exist. |
+| `files[].before_sha256`, `files[].after_sha256` | SHA-256 of the raw bytes, or of the target for a symlink. `null` where the file does not exist. |
+| `files[].after_blob` | Blob with the new contents. `null` for deleted files, symlinks, and binary files, which are only in the patch. |
 
-Captured files are tracked files plus untracked files that `.gitignore` does not exclude. Kao records exact bytes: it ignores line-ending conversion and filters from `.gitattributes` and Git settings. Regular files, executable bits, and symlinks are supported. Changes involving submodules or embedded repositories make the capture incomplete.
+## Rebuild the before files
 
-Once Kao has written a complete archive on descriptor 3, it exits with the command's exit code, or 128 plus the signal number if a signal ended the command. This holds even when the capture is incomplete: `capture.complete` and `capture.error` in the manifest report the problem, and stderr names the operation's files, which Kao keeps.
+To get the files as they were before the command:
 
-Kao exits with 125 in two cases, and reports the reason on stderr:
+1. In an empty directory, write each after blob at its path with its `after_mode`.
+2. For each path with an after blob or a `null` `after_mode`, run `git apply -R --binary --include=<path> changes.patch`. Put a `\` before each `*`, `?`, `[`, and `\` in the path.
+3. For a deleted file, use `before_mode`. Some Git versions recreate it without the executable bit.
 
-- Kao never ran the command, for example when it is invoked incorrectly, outside a Git working tree, or the command cannot start.
-- Kao ran the command but could not deliver the archive on descriptor 3. Stderr reports `capture output failed` and where the operation's files are kept.
+## Exit status
 
-### Cancel a command
+| Situation | Exit code | Archive |
+| --- | --- | --- |
+| The command ran | Its exit code, or 128 plus the signal number | Complete |
+| The command ran, but the capture failed | Same as above | Complete, with `capture.complete` `false` |
+| The command did not start | 125 | Complete, with `command.error` |
+| Bad arguments, no Git working tree, descriptor 3 not writable, Git older than 2.41, or cancelled before the command started | 125 | None |
+| Kao could not write the archive | 125 | None or partial |
 
-Kao runs the command in its own process group. To cancel it, send SIGINT, SIGTERM, or SIGHUP to Kao's process ID only, never to the process group. Kao forwards the signal to the command's process group. If the group has not exited after 3 seconds, Kao sends it SIGKILL. Kao then captures the changes and writes the archive as usual; `command.signal` in the manifest reports the signal that ended the command.
+Kao reports errors on stderr. When a capture fails after the command ran, stderr names the directory where Kao kept the operation files.
 
-After signalling Kao, wait for it to exit. Killing Kao with SIGKILL loses the capture: the changes stay on disk and the next capture includes them in its before contents. A signal that arrives while Kao waits for the lock ends Kao before the command runs. A signal that was ignored when Kao started, such as SIGHUP under `nohup`, stays ignored by Kao and the command.
+## Cancel a command
 
-When Kao is the foreground job of a terminal, it gives the terminal to the command while it runs, so the command can read it and Ctrl-C reaches the command.
+Send SIGINT, SIGTERM, or SIGHUP to the process ID of Kao, then wait for Kao to exit. Kao forwards the signal to the process group of the command, sends SIGKILL after 3 seconds, and then writes the archive as usual. Do not signal the process group yourself, and do not send SIGKILL to Kao. If Kao dies, the capture is lost and the next capture counts the changes as already there.
 
-### Run a command under the lock without capture
+A signal that arrives while Kao waits for the lock ends Kao before the command runs. Signals that were ignored when Kao started stay ignored. If Kao runs in the foreground of a terminal, the command gets the terminal, so it can read input and receive Ctrl-C.
+
+## Locking
+
+Kao holds one lock per repository, in `.git/kao.lock`, shared by linked worktrees. `kao run` holds it until it writes the archive. Other Kao invocations wait.
+
+`kao lock` runs a command under the lock without capturing, and exits with the exit code of the command. Use it for tools that record their own changes:
 
 ```sh
 kao lock -- deltoids edit <trace-id>
 ```
 
-`kao lock` waits for the same lock as `kao run`, runs the command, and returns its exit code. It does not capture changes; use it for tools that record their own changes, such as the Deltoids edit and write tools. A change made under `kao lock` never appears in a `kao run` capture.
-
-### Locking
-
-`kao run` and `kao lock` hold one lock per repository (`.git/kao.lock`, shared by linked worktrees) while the command runs and until the capture is written. Concurrent invocations wait, and long-running commands block other Kao invocations. Editors and processes started outside Kao do not take the lock; their writes during a `kao run` command appear in that command's capture.
-
-## How it works
-
-Kao keeps a private Git index and object directory in `.git/kao/`, or in the worktree's Git directory for a linked worktree. Before the command, Kao stages the working tree into that private index and writes a tree. After the command, it stages again and diffs the index against the before tree. Your index, branches, and commits are never changed.
-
-The first capture in a working tree reads every file. Later captures only check file metadata and reread files that changed. Kao discards the private store when its objects exceed 256 MiB; the next capture rebuilds it.
-
-Each operation's files live in `.git/kao/operations/` while Kao runs and are removed on success.
-
-## Development
-
-Build and run:
-
-```sh
-cargo build --locked
-cargo run --locked -- run -- bash -c 'printf "hello\\n"' 3>/tmp/capture.tar
-```
-
-Run the same checks as CI:
-
-```sh
-cargo fmt --all -- --check
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-```
-
-See [capture benchmarks](BENCHMARKS.md) for repeatable speed tests and measured overhead.
+Programs outside Kao, such as editors, do not take the lock. Their writes during a `kao run` command appear in its capture.
