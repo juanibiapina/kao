@@ -10,7 +10,7 @@ Kao runs your command as usual, but it also returns data about every file that t
 
 ## Install
 
-Kao requires macOS or Linux, Git 2.41 or newer, and Rust installed with rustup.
+Install from source:
 
 ```sh
 git clone https://github.com/juanibiapina/kao
