@@ -1,5 +1,8 @@
 # Kao
 
+> [!WARNING]
+> Kao is an experiment. The main blocker is performance: each capture adds 60–170 ms to a command, mostly because Kao runs `git add -A` twice and Git checks the metadata of every file. See [BENCHMARKS.md](BENCHMARKS.md).
+
 Kao (pronounced cow) tracks which files each command changes. It is made for agents that run commands in a Git repository.
 
 Kao runs your command as usual, but it also returns data about every file that the command changed: which files, what they contained before, and what they contain after.
